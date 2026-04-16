@@ -187,16 +187,21 @@ function handleSessionIdle(
   const { sessionID } = event.properties;
   if (!sessionID) return;
 
-  const existing = debounceTimers.get(sessionID);
+  const session = getSession(sessionID);
+  if (!session) return;
+
+  const targetID = session.parentID || sessionID;
+
+  const existing = debounceTimers.get(targetID);
   if (existing) {
     clearTimeout(existing);
   }
 
   debounceTimers.set(
-    sessionID,
+    targetID,
     setTimeout(() => {
-      void saveSessionToFile(sessionID, client, directory, saveDir, globalSaveDir);
-      debounceTimers.delete(sessionID);
+      void saveSessionToFile(targetID, client, directory, saveDir, globalSaveDir);
+      debounceTimers.delete(targetID);
     }, DEFAULT_CONFIG.debounceMs)
   );
 }
@@ -211,13 +216,18 @@ async function handleSessionDeleted(
   const { info } = event.properties;
   if (!info?.id) return;
 
-  const timer = debounceTimers.get(info.id);
+  const session = getSession(info.id);
+  if (!session) return;
+
+  const targetID = session.parentID || info.id;
+
+  const timer = debounceTimers.get(targetID);
   if (timer) {
     clearTimeout(timer);
-    debounceTimers.delete(info.id);
+    debounceTimers.delete(targetID);
   }
 
-  await saveSessionToFile(info.id, client, directory, saveDir, globalSaveDir);
+  await saveSessionToFile(targetID, client, directory, saveDir, globalSaveDir);
   deleteSession(info.id);
 }
 
@@ -246,7 +256,7 @@ async function saveSessionToFile(
     });
 
     const rawMessages = response.data || [];
-    const messages = await convertMessages(rawMessages);
+    const messages = convertMessages(rawMessages);
 
     if (messages.length === 0) {
       return;
@@ -276,13 +286,13 @@ async function saveSessionToFile(
     }
 
     const children = getChildSessions(sessionID);
-    const childData: ChildSessionData[] = await Promise.all(
+    const childResults = await Promise.allSettled(
       children.map(async (child) => {
         const childResponse = await client.session.messages({
           path: { id: child.id },
           query: { directory },
         });
-        const childMessages = await convertMessages(childResponse.data || []);
+        const childMessages = convertMessages(childResponse.data || []);
         return {
           title: child.title,
           createdAt: child.createdAt,
@@ -290,6 +300,15 @@ async function saveSessionToFile(
         };
       })
     );
+
+    const childData: ChildSessionData[] = childResults
+      .filter((r): r is PromiseFulfilledResult<ChildSessionData> => r.status === 'fulfilled')
+      .map((r) => r.value);
+
+    const rejectedCount = childResults.length - childData.length;
+    if (rejectedCount > 0) {
+      console.error(`[autosave] Failed to read ${rejectedCount} child session(s) for ${sessionID}`);
+    }
 
     await processImagesInMessages(messages, session.filePath, title, session.createdAt, globalSaveDir);
     for (const child of childData) {
@@ -312,7 +331,7 @@ async function saveSessionToFile(
   }
 }
 
-async function convertMessages(rawMessages: RawMessage[]): Promise<MessageData[]> {
+function convertMessages(rawMessages: RawMessage[]): MessageData[] {
   return rawMessages.map((msg) => {
     const rawParts = (msg as unknown as { parts?: RawPart[] }).parts || [];
     return {
