@@ -1,4 +1,4 @@
-import type { Plugin, Hooks } from '@opencode-ai/plugin';
+import type { Plugin } from '@opencode-ai/plugin';
 import type { Event } from '@opencode-ai/sdk';
 import {
   DEFAULT_CONFIG,
@@ -7,7 +7,6 @@ import {
   type ChildSessionData,
 } from './types.js';
 import {
-  ensureDirectory,
   writeSessionFile,
   isBase64ImageUrl,
   saveImageFromBase64,
@@ -17,7 +16,6 @@ import {
   writeToSecondaryLocation,
   saveImageToSecondaryLocation,
 } from './file-manager.js';
-import { join } from 'node:path';
 import {
   createSession,
   getSession,
@@ -26,6 +24,7 @@ import {
   updateSessionTitle,
 } from './session-tracker.js';
 import { formatSession, extractTopicFromMessage } from './formatter.js';
+import { regenerateViews } from './view-generator.js';
 
 interface SessionCreatedEvent {
   type: 'session.created';
@@ -97,24 +96,39 @@ interface RawPart {
 }
 
 const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const viewDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+let globalSaveDir: string | null = null;
+
+function scheduleViewRegeneration(dir: string, delay: number): void {
+  const existing = viewDebounceTimers.get(dir);
+  if (existing) {
+    clearTimeout(existing);
+  }
+  viewDebounceTimers.set(
+    dir,
+    setTimeout(() => {
+      void regenerateViews(dir).catch(() => {
+        // View generation errors are logged internally
+      });
+      viewDebounceTimers.delete(dir);
+    }, delay)
+  );
+}
 
 const plugin: Plugin = async (input) => {
   try {
-    const { client, directory } = input;
-    const typedClient = client as unknown as OpencodeClient;
+    const { directory } = input;
 
-    const saveDir = await ensureDirectory(directory, DEFAULT_CONFIG);
-
-    let globalSaveDir: string | null = null;
     const globalPath = getGlobalSaveDirectory(directory);
     if (globalPath) {
       globalSaveDir = await ensureGlobalDirectory(globalPath);
     }
 
-    const hooks: Hooks = {
-      event: async ({ event }: { event: Event }) => {
+    const hooks = {
+      event: async ({ event }: { event: Event }): Promise<void> => {
         try {
-          await handleEvent(event, typedClient, directory, saveDir, globalSaveDir);
+          await handleEvent(event, input, globalSaveDir);
         } catch {
           // Silently ignore event handling errors to not affect other plugins
         }
@@ -123,18 +137,18 @@ const plugin: Plugin = async (input) => {
 
     return hooks;
   } catch {
-    // Return empty hooks if initialization fails to not block other plugins
     return {};
   }
 };
 
 async function handleEvent(
   event: Event,
-  client: OpencodeClient,
-  directory: string,
-  saveDir: string,
+  input: { client: unknown; directory: string },
   globalSaveDir: string | null
 ): Promise<void> {
+  const client = input.client as unknown as OpencodeClient;
+  const directory = input.directory;
+
   switch (event.type) {
     case 'session.created':
       handleSessionCreated(event as SessionCreatedEvent);
@@ -143,14 +157,13 @@ async function handleEvent(
       handleSessionUpdated(event as SessionUpdatedEvent);
       break;
     case 'session.idle':
-      handleSessionIdle(event as SessionIdleEvent, client, directory, saveDir, globalSaveDir);
+      handleSessionIdle(event as SessionIdleEvent, client, directory, globalSaveDir);
       break;
     case 'session.deleted':
       await handleSessionDeleted(
         event as SessionDeletedEvent,
         client,
         directory,
-        saveDir,
         globalSaveDir
       );
       break;
@@ -181,7 +194,6 @@ function handleSessionIdle(
   event: SessionIdleEvent,
   client: OpencodeClient,
   directory: string,
-  saveDir: string,
   globalSaveDir: string | null
 ): void {
   const { sessionID } = event.properties;
@@ -200,7 +212,7 @@ function handleSessionIdle(
   debounceTimers.set(
     targetID,
     setTimeout(() => {
-      void saveSessionToFile(targetID, client, directory, saveDir, globalSaveDir);
+      void saveSessionToFile(targetID, client, directory, globalSaveDir);
       debounceTimers.delete(targetID);
     }, DEFAULT_CONFIG.debounceMs)
   );
@@ -210,7 +222,6 @@ async function handleSessionDeleted(
   event: SessionDeletedEvent,
   client: OpencodeClient,
   directory: string,
-  saveDir: string,
   globalSaveDir: string | null
 ): Promise<void> {
   const { info } = event.properties;
@@ -227,7 +238,7 @@ async function handleSessionDeleted(
     debounceTimers.delete(targetID);
   }
 
-  await saveSessionToFile(targetID, client, directory, saveDir, globalSaveDir);
+  await saveSessionToFile(targetID, client, directory, globalSaveDir);
   deleteSession(info.id);
 }
 
@@ -235,7 +246,6 @@ async function saveSessionToFile(
   sessionID: string,
   client: OpencodeClient,
   directory: string,
-  saveDir: string,
   globalSaveDir: string | null
 ): Promise<void> {
   try {
@@ -245,7 +255,7 @@ async function saveSessionToFile(
     if (session.parentID) {
       const parent = getSession(session.parentID);
       if (parent) {
-        await saveSessionToFile(session.parentID, client, directory, saveDir, globalSaveDir);
+        await saveSessionToFile(session.parentID, client, directory, globalSaveDir);
       }
       return;
     }
@@ -280,10 +290,7 @@ async function saveSessionToFile(
       }
     }
 
-    if (!session.filePath) {
-      const filename = generateFilename(title || 'untitled', session.createdAt, DEFAULT_CONFIG);
-      session.filePath = join(saveDir, filename);
-    }
+    const filePath = session.filePath;
 
     const children = getChildSessions(sessionID);
     const childResults = await Promise.allSettled(
@@ -307,12 +314,14 @@ async function saveSessionToFile(
 
     const rejectedCount = childResults.length - childData.length;
     if (rejectedCount > 0) {
-      console.error(`[autosave] Failed to read ${rejectedCount} child session(s) for ${sessionID}`);
+      console.error(`[autorecord] Failed to read ${rejectedCount} child session(s) for ${sessionID}`);
     }
 
-    await processImagesInMessages(messages, session.filePath, title, session.createdAt, globalSaveDir);
-    for (const child of childData) {
-      await processImagesInMessages(child.messages, session.filePath, title, session.createdAt, globalSaveDir);
+    if (globalSaveDir) {
+      await processImagesInMessages(messages, filePath, title, session.createdAt, globalSaveDir);
+      for (const child of childData) {
+        await processImagesInMessages(child.messages, filePath, title, session.createdAt, globalSaveDir);
+      }
     }
 
     const content = formatSession(
@@ -321,13 +330,23 @@ async function saveSessionToFile(
       messages,
       childData
     );
-    await writeSessionFile(session.filePath, content);
 
     if (globalSaveDir) {
-      await writeToSecondaryLocation(session.filePath, globalSaveDir, content);
+      const filename = generateFilename(title || 'untitled', session.createdAt, DEFAULT_CONFIG);
+      const globalFilePath = `${globalSaveDir}/${filename}`;
+      await writeSessionFile(globalFilePath, content);
+
+      if (filePath) {
+        await writeToSecondaryLocation(filePath, globalSaveDir, content);
+      }
+
+      // Trigger view regeneration for main sessions
+      if (!session.parentID && DEFAULT_CONFIG.view.enabled) {
+        scheduleViewRegeneration(globalSaveDir, DEFAULT_CONFIG.view.debounceMs);
+      }
     }
   } catch (error) {
-    console.error(`[autosave] Error saving session ${sessionID}:`, error);
+    console.error(`[autorecord] Error saving session ${sessionID}:`, error);
   }
 }
 

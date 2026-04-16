@@ -45,6 +45,20 @@ export interface FormattedMessage {
 }
 
 /**
+ * View generation configuration for conversation records.
+ */
+export interface ViewConfig {
+  /** Whether to enable automatic view generation */
+  enabled: boolean;
+
+  /** Output formats: 'html' for overview page, 'qa' for Q&A documents */
+  formats: ('html' | 'qa')[];
+
+  /** Debounce delay for view regeneration (milliseconds) */
+  debounceMs: number;
+}
+
+/**
  * Plugin configuration options.
  * V1 uses hardcoded defaults; future versions may expose these.
  */
@@ -57,6 +71,9 @@ export interface PluginConfig {
 
   /** Debounce delay for idle saves (milliseconds) */
   debounceMs: number;
+
+  /** View generation settings */
+  view: ViewConfig;
 }
 
 /**
@@ -67,6 +84,11 @@ export const DEFAULT_CONFIG: PluginConfig = {
   saveDirectory: './conversations',
   maxTopicLength: 30,
   debounceMs: 2000,
+  view: {
+    enabled: true,
+    formats: ['html', 'qa'],
+    debounceMs: 10000,
+  },
 };
 
 /**
