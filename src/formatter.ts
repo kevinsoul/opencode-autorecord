@@ -22,7 +22,7 @@ export function formatSession(
   lines.push('');
   lines.push('---');
   lines.push('');
-  lines.push('## Conversation');
+  lines.push('## AutoRecord');
   lines.push('');
 
   for (const message of messages) {
