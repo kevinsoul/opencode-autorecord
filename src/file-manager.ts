@@ -15,7 +15,7 @@ export async function ensureDirectory(
   try {
     await mkdir(dir, { recursive: true });
   } catch (error) {
-    console.error(`[autosave] Failed to create directory ${dir}:`, error);
+    console.error(`[autorecord] Failed to create directory ${dir}:`, error);
   }
   return dir;
 }
@@ -67,7 +67,7 @@ export async function writeSessionFile(
     await rename(tempPath, filePath);
     return true;
   } catch (error) {
-    console.error(`[autosave] Failed to write file ${filePath}:`, error);
+    console.error(`[autorecord] Failed to write file ${filePath}:`, error);
     try {
       await unlink(tempPath);
     } catch {
@@ -143,7 +143,7 @@ export async function saveImageFromBase64(
 
     return `images/${imageFilename}`;
   } catch (error) {
-    console.error('[autosave] Failed to save image:', error);
+    console.error('[autorecord] Failed to save image:', error);
     return null;
   }
 }
@@ -158,7 +158,7 @@ export function getGlobalSaveDirectory(projectDir: string): string | null {
     const projectName = basename(projectDir);
     const sanitizedProjectName = sanitizeTopic(projectName, 50);
 
-    return join(home, '.conversations', sanitizedProjectName);
+    return join(home, 'opencode-autorecord', sanitizedProjectName);
   } catch {
     return null;
   }
@@ -172,7 +172,7 @@ export async function ensureGlobalDirectory(
     return globalSaveDir;
   } catch (error) {
     console.error(
-      `[autosave] Failed to create global directory ${globalSaveDir}:`,
+      `[autorecord] Failed to create global directory ${globalSaveDir}:`,
       error
     );
     return null;
@@ -189,7 +189,7 @@ export async function writeToSecondaryLocation(
     const secondaryPath = join(globalSaveDir, filename);
     await writeSessionFile(secondaryPath, content);
   } catch (error) {
-    console.error(`[autosave] Failed to write to secondary location:`, error);
+    console.error(`[autorecord] Failed to write to secondary location:`, error);
   }
 }
 
@@ -217,6 +217,6 @@ export async function saveImageToSecondaryLocation(
     const buffer = Buffer.from(extracted.data, 'base64');
     await writeFile(imagePath, buffer);
   } catch (error) {
-    console.error('[autosave] Failed to save image to secondary location:', error);
+    console.error('[autorecord] Failed to save image to secondary location:', error);
   }
 }
