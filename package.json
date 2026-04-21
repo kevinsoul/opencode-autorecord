@@ -39,8 +39,8 @@
         "url": "https://github.com/kevinsoul/opencode-autorecord//issues"
     },
     "dependencies": {
-        "@opencode-ai/plugin": "^1.1.42",
-        "@opencode-ai/sdk": "^1.1.42"
+        "@opencode-ai/plugin": "^1.14.19",
+        "@opencode-ai/sdk": "^1.14.19"
     },
     "devDependencies": {
         "@types/node": "^22.0.0",

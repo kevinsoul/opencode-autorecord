@@ -30,21 +30,36 @@
 
 ## 安装
 
+### 全局安装（推荐）
+
 ```bash
 npm install -g opencode-autorecord
+```
+
+### 本地安装
+
+```bash
+npm install --save-dev opencode-autorecord
 ```
 
 
 
 ## 配置
 
-在 `opencode.json`（项目级或 `~/.config/opencode/opencode.json`）中添加插件：
+在 `opencode.json` 中添加插件配置：
 
 ```json
 {
   "plugin": ["opencode-autorecord"]
 }
 ```
+
+配置文件位置（按优先级排序）：
+
+1. **项目级配置**：`./opencode.json`（当前工作目录）
+2. **用户级配置**：`~/.config/opencode/opencode.json`
+
+> **注意**：至少需要在一个位置的配置文件中添加插件，插件即可生效。建议添加到用户级配置，这样所有项目都会自动保存会话记录。
 
 
 

@@ -20,20 +20,35 @@
 
 ## Installation
 
+### Global Installation (Recommended)
+
 ```bash
 npm install -g opencode-autorecord
+```
+
+### Local Installation
+
+```bash
+npm install --save-dev opencode-autorecord
 ```
 
 
 ## Configuration
 
-Add the plugin to your `opencode.json` (project-level or `~/.config/opencode/opencode.json`):
+Add the plugin to your `opencode.json`:
 
 ```json
 {
   "plugin": ["opencode-autorecord"]
 }
 ```
+
+Configuration file locations (in order of priority):
+
+1. **Project-level**: `./opencode.json` (current working directory)
+2. **User-level**: `~/.config/opencode/opencode.json`
+
+> **Note**: The plugin works as long as it's added to at least one configuration file. Adding it to the user-level config is recommended so all projects automatically save session records.
 
 
 ## Directory Structure
