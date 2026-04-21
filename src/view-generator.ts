@@ -614,7 +614,7 @@ function buildProjectCards(projects: ProjectData[]): string {
     }).join('');
 
     return `
-      <div class="project-card" data-project="${escapeHtml(p.name.toLowerCase())}" style="--project-accent-color:${color}">
+      <div class="project-card" data-project="${escapeHtml(p.name)}" style="--project-accent-color:${color}">
         <div class="project-header" onclick="openModal('${escapeHtml(p.name)}')">
           <div class="project-title-section">
             <div class="project-icon" style="background:${color}">
