@@ -168,6 +168,8 @@ function extractFullConversation(content: string): ConversationBlock[] {
       const messageLines: string[] = [];
       let inToolBlock = false;
       let toolBlock: ConversationBlock | null = null;
+      let inStepBlock = false;
+      let stepLines: string[] = [];
 
       while (i < lines.length) {
         const currentLine = lines[i];
@@ -181,7 +183,7 @@ function extractFullConversation(content: string): ConversationBlock[] {
         const toolMatch = currentLine.match(/#### 🔧 Tool:\s*(\w+)/);
         if (toolMatch) {
           // Save previous message content if any
-          if (messageLines.length > 0 && !inToolBlock) {
+          if (messageLines.length > 0 && !inToolBlock && !inStepBlock) {
             const msgContent = messageLines.join('\n').trim();
             if (msgContent) {
               blocks.push({
@@ -214,6 +216,44 @@ function extractFullConversation(content: string): ConversationBlock[] {
           }
           inToolBlock = false;
           toolBlock = null;
+          i += 1;
+          continue;
+        }
+
+        // Check for step block start: [step-start part]
+        if (currentLine.includes('[step-start')) {
+          // Save previous message content as question if any
+          if (messageLines.length > 0 && !inToolBlock && !inStepBlock) {
+            const msgContent = messageLines.join('\n').trim();
+            if (msgContent) {
+              blocks.push({
+                type: 'message',
+                timestamp,
+                content: msgContent,
+              });
+            }
+            messageLines.length = 0;
+          }
+
+          inStepBlock = true;
+          stepLines = [];
+          i += 1;
+          continue;
+        }
+
+        // Check for step block end: [step-end part]
+        if (inStepBlock && currentLine.includes('[step-end')) {
+          // Save step block as assistant answer
+          const stepContent = stepLines.join('\n').trim();
+          if (stepContent) {
+            blocks.push({
+              type: 'message',
+              timestamp,
+              content: stepContent,
+            });
+          }
+          inStepBlock = false;
+          stepLines = [];
           i += 1;
           continue;
         }
@@ -274,8 +314,13 @@ function extractFullConversation(content: string): ConversationBlock[] {
               }
             }
           }
+        } else if (inStepBlock) {
+          // Collect step block content (AI thinking and answer)
+          if (currentLine.trim() || stepLines.length > 0) {
+            stepLines.push(currentLine);
+          }
         } else {
-          // Regular message content
+          // Regular message content (question text after Assistant timestamp)
           if (currentLine.trim() || messageLines.length > 0) {
             messageLines.push(currentLine);
           }
@@ -285,13 +330,25 @@ function extractFullConversation(content: string): ConversationBlock[] {
       }
 
       // Save remaining message content
-      if (messageLines.length > 0 && !inToolBlock) {
+      if (messageLines.length > 0 && !inToolBlock && !inStepBlock) {
         const msgContent = messageLines.join('\n').trim();
         if (msgContent) {
           blocks.push({
             type: 'message',
             timestamp,
             content: msgContent,
+          });
+        }
+      }
+
+      // Save remaining step block
+      if (stepLines.length > 0 && inStepBlock) {
+        const stepContent = stepLines.join('\n').trim();
+        if (stepContent) {
+          blocks.push({
+            type: 'message',
+            timestamp,
+            content: stepContent,
           });
         }
       }
@@ -463,6 +520,7 @@ function formatConversationBlock(block: ConversationBlock, index: number): strin
     // Clean up step markers
     const cleanContent = content
       .replace(/\*\[step-start.*?\]\*/g, '')
+      .replace(/\*\[step-end.*?\]\*/g, '')
       .replace(/\*\[step-finish.*?\]\*/g, '')
       .trim();
 
