@@ -24,6 +24,7 @@ import {
   updateSessionTitle,
 } from './session-tracker.js';
 import { formatSession, extractTopicFromMessage } from './formatter.js';
+import { regenerateViews } from './view-generator.js';
 
 interface SessionCreatedEvent {
   type: 'session.created';
@@ -95,8 +96,25 @@ interface RawPart {
 }
 
 const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const viewDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 let globalSaveDir: string | null = null;
+
+function scheduleViewRegeneration(dir: string, delay: number): void {
+  const existing = viewDebounceTimers.get(dir);
+  if (existing) {
+    clearTimeout(existing);
+  }
+  viewDebounceTimers.set(
+    dir,
+    setTimeout(() => {
+      void regenerateViews(dir).catch(() => {
+        // View generation errors are logged internally
+      });
+      viewDebounceTimers.delete(dir);
+    }, delay)
+  );
+}
 
 const plugin: Plugin = async (input) => {
   try {
@@ -108,7 +126,7 @@ const plugin: Plugin = async (input) => {
     }
 
     const hooks = {
-      event: async ({ event }: { event: Event }) => {
+      event: async ({ event }: { event: Event }): Promise<void> => {
         try {
           await handleEvent(event, input, globalSaveDir);
         } catch {
@@ -320,6 +338,11 @@ async function saveSessionToFile(
 
       if (filePath) {
         await writeToSecondaryLocation(filePath, globalSaveDir, content);
+      }
+
+      // Trigger view regeneration for main sessions
+      if (!session.parentID && DEFAULT_CONFIG.view.enabled) {
+        scheduleViewRegeneration(globalSaveDir, DEFAULT_CONFIG.view.debounceMs);
       }
     }
   } catch (error) {
