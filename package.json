@@ -15,7 +15,7 @@
         "dist"
     ],
     "bin": {
-        "opencode-autorecord": "./dist/cli.js"
+        "opencode-autorecord": "dist/cli.js"
     },
     "scripts": {
         "build": "tsup",
