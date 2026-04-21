@@ -97,6 +97,52 @@ npm install --save-dev opencode-autorecord
 
 
 
+## CLI 命令行工具
+
+除了作为 OpenCode 插件自动运行外，还提供了 CLI 命令用于手动重新生成视图。
+
+### 安装 CLI
+
+```bash
+npm install -g opencode-autorecord
+```
+
+### 重新生成视图
+
+当你想手动重新生成 HTML 概览页和问答文档时：
+
+```bash
+# 使用全局安装的命令
+opencode-autorecord regenerate ~/opencode-autorecord/your-project
+
+# 或使用 npx（无需全局安装）
+npx opencode-autorecord regenerate ~/opencode-autorecord/your-project
+```
+
+**参数说明：**
+
+- `regenerate`：重新生成命令
+- `<保存目录>`：全局保存目录的路径，通常是 `~/opencode-autorecord/<项目名>`
+
+**功能说明：**
+
+- 扫描指定目录下的所有 Markdown 文件
+- 生成 `opencode-overview.html`（HTML 概览页，包含项目卡片和时间线视图）
+- 为每个项目生成 `对话式问答文档.md`（整理所有对话记录）
+- 如果存在索引文件 `.autorecord-index.json`，将使用增量扫描；否则执行全量扫描并创建新的索引
+
+**示例：**
+
+```bash
+# 重新生成 my-project 项目的视图
+opencode-autorecord regenerate ~/opencode-autorecord/my-project
+
+# 重新生成当前项目的视图（如果在项目目录下）
+opencode-autorecord regenerate ./conversations
+```
+
+
+
 ## 许可证
 
 [Apache 2.0](https://github.com/kevinsoul/opencode-autorecord/commit/6c59a77af7dafec32ebfcc9c892ed4b0f9a6a06f)
