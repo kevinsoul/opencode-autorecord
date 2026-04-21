@@ -1,22 +1,20 @@
 import { readdir, readFile, writeFile, appendFile, stat } from 'node:fs/promises';
 import { join, dirname, basename } from 'node:path';
+import {
+  loadIndex,
+  saveIndex,
+  createEmptyIndex,
+  updateFileIndex,
+  removeFileFromIndex,
+  getFilesToProcess,
+  convertIndexToProjects,
+  type AutorecordIndex,
+  type SessionInfo,
+  type ProjectData,
+} from './index-manager.js';
 
-// ─── Types ───────────────────────────────────────────────────────────────────
-
-interface SessionInfo {
-  title: string;
-  date: string;
-  userRequest: string;
-  category: string;
-  filename: string;
-}
-
-interface ProjectData {
-  name: string;
-  sessions: SessionInfo[];
-  count: number;
-  lastModified: number;
-}
+// Re-export types for backward compatibility
+export type { SessionInfo, ProjectData };
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -195,28 +193,78 @@ function extractSessionInfo(filePath: string, content: string): SessionInfo | nu
 
 // ─── Project Scanning ────────────────────────────────────────────────────────
 
-async function scanProjects(baseDir: string): Promise<ProjectData[]> {
-  const projects: ProjectData[] = [];
+// Helper functions for incremental scanning
+async function listProjects(baseDir: string): Promise<Array<{ name: string; dir: string }>> {
   const entries = await readdir(baseDir, { withFileTypes: true });
+  const projects: Array<{ name: string; dir: string }> = [];
 
   for (const entry of entries) {
     if (!entry.isDirectory() || entry.name.startsWith('.') || entry.name === '__pycache__') {
       continue;
     }
+    projects.push({ name: entry.name, dir: join(baseDir, entry.name) });
+  }
 
-    const projectDir = join(baseDir, entry.name);
-    const files = await readdir(projectDir, { withFileTypes: true });
-    const mdFiles = files.filter(
-      (f) => f.isFile() && f.name.endsWith('.md') && !f.name.startsWith('对话式问答文档')
-    );
+  return projects;
+}
 
+async function listMdFiles(projectDir: string): Promise<string[]> {
+  const files = await readdir(projectDir, { withFileTypes: true });
+  return files
+    .filter((f) => f.isFile() && f.name.endsWith('.md') && !f.name.startsWith('对话式问答文档'))
+    .map((f) => join(projectDir, f.name));
+}
+
+async function scanProjectsIncremental(
+  baseDir: string,
+  index: AutorecordIndex
+): Promise<ProjectData[]> {
+  const { newFiles, modifiedFiles, deletedFiles } = await getFilesToProcess(
+    index,
+    baseDir,
+    listProjects,
+    listMdFiles
+  );
+
+  // Remove deleted files from index
+  for (const { filePath, projectName } of deletedFiles) {
+    removeFileFromIndex(index, projectName, filePath);
+  }
+
+  // Process new and modified files
+  const filesToProcess = [...newFiles, ...modifiedFiles];
+  for (const { filePath, projectName, stat: fileStat } of filesToProcess) {
+    try {
+      const content = await readFile(filePath, 'utf-8');
+      const info = extractSessionInfo(filePath, content);
+      if (info) {
+        updateFileIndex(index, projectName, filePath, fileStat, info);
+      }
+    } catch {
+      // Skip unreadable files
+    }
+  }
+
+  // Update index timestamp
+  index.lastFullScan = Date.now();
+
+  // Convert index to projects format
+  return convertIndexToProjects(index);
+}
+
+// Fallback full scan (used when no index exists or for periodic rebuilds)
+async function scanProjectsFull(baseDir: string): Promise<ProjectData[]> {
+  const projects: ProjectData[] = [];
+  const projectList = await listProjects(baseDir);
+
+  for (const project of projectList) {
+    const mdFiles = await listMdFiles(project.dir);
     if (mdFiles.length === 0) continue;
 
     const sessions: SessionInfo[] = [];
     let lastModified = 0;
 
-    for (const f of mdFiles) {
-      const filePath = join(projectDir, f.name);
+    for (const filePath of mdFiles) {
       try {
         const content = await readFile(filePath, 'utf-8');
         const info = extractSessionInfo(filePath, content);
@@ -237,7 +285,7 @@ async function scanProjects(baseDir: string): Promise<ProjectData[]> {
         return db.getTime() - da.getTime();
       });
       projects.push({
-        name: entry.name,
+        name: project.name,
         sessions,
         count: sessions.length,
         lastModified,
@@ -886,7 +934,39 @@ export async function regenerateViews(globalSaveDir: string): Promise<void> {
   const logPath = join(baseDir, '.autorecord-views.log');
 
   try {
-    const projects = await scanProjects(baseDir);
+    // Try to load existing index
+    let index = await loadIndex(baseDir);
+    let projects: ProjectData[];
+    let isIncremental = false;
+
+    if (index) {
+      // Use incremental scanning with index
+      projects = await scanProjectsIncremental(baseDir, index);
+      isIncremental = true;
+    } else {
+      // Fallback to full scan and create new index
+      index = createEmptyIndex();
+      projects = await scanProjectsFull(baseDir);
+
+      // Build index from full scan results
+      for (const project of projects) {
+        const projectDir = join(baseDir, project.name);
+        const mdFiles = await listMdFiles(projectDir);
+
+        for (const filePath of mdFiles) {
+          try {
+            const content = await readFile(filePath, 'utf-8');
+            const info = extractSessionInfo(filePath, content);
+            if (info) {
+              const s = await stat(filePath);
+              updateFileIndex(index, project.name, filePath, { mtime: s.mtime, size: s.size }, info);
+            }
+          } catch {
+            // Skip unreadable files
+          }
+        }
+      }
+    }
 
     if (projects.length === 0) {
       await writeViewLog(logPath, 'INFO: No projects with markdown files found');
@@ -908,9 +988,13 @@ export async function regenerateViews(globalSaveDir: string): Promise<void> {
       qaTotal += count;
     }
 
+    // Save updated index
+    await saveIndex(baseDir, index);
+
+    const scanMode = isIncremental ? 'incremental' : 'full';
     await writeViewLog(
       logPath,
-      `INFO: Views regenerated - ${projects.length} projects, ${totalSessions} sessions, ${qaTotal} QA docs, HTML: ${htmlPath}`
+      `INFO: Views regenerated (${scanMode}) - ${projects.length} projects, ${totalSessions} sessions, ${qaTotal} QA docs, HTML: ${htmlPath}`
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
