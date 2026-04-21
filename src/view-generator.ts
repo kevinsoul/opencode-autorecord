@@ -16,6 +16,18 @@ import {
 // Re-export types for backward compatibility
 export type { SessionInfo, ProjectData };
 
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+interface ConversationBlock {
+  type: 'message' | 'tool';
+  timestamp: string;
+  content?: string;
+  toolName?: string;
+  toolStatus?: string;
+  toolInput?: string;
+  toolOutput?: string;
+}
+
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const LUCIDE_ICON_MAP = [
@@ -131,6 +143,173 @@ function categorizeSession(title: string): string {
   return '开发讨论';
 }
 
+function extractFullConversation(content: string): ConversationBlock[] {
+  const blocks: ConversationBlock[] = [];
+  const lines = content.split('\n');
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // Detect assistant message block
+    if (line.includes('### 🤖 Assistant')) {
+      // Extract timestamp from next line
+      let timestamp = '';
+      if (i + 1 < lines.length) {
+        const timeMatch = lines[i + 1].match(/\*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\*/);
+        if (timeMatch) {
+          timestamp = timeMatch[1];
+          i += 1;
+        }
+      }
+
+      // Collect message content until next block
+      i += 1;
+      const messageLines: string[] = [];
+      let inToolBlock = false;
+      let toolBlock: ConversationBlock | null = null;
+
+      while (i < lines.length) {
+        const currentLine = lines[i];
+
+        // Check for next assistant block or end of conversation
+        if (currentLine.includes('### 🤖 Assistant') || currentLine.startsWith('---')) {
+          break;
+        }
+
+        // Check for tool block start
+        const toolMatch = currentLine.match(/#### 🔧 Tool:\s*(\w+)/);
+        if (toolMatch) {
+          // Save previous message content if any
+          if (messageLines.length > 0 && !inToolBlock) {
+            const msgContent = messageLines.join('\n').trim();
+            if (msgContent) {
+              blocks.push({
+                type: 'message',
+                timestamp,
+                content: msgContent,
+              });
+            }
+            messageLines.length = 0;
+          }
+
+          inToolBlock = true;
+          toolBlock = {
+            type: 'tool',
+            timestamp,
+            toolName: toolMatch[1],
+            toolStatus: '',
+            toolInput: '',
+            toolOutput: '',
+          };
+          i += 1;
+          continue;
+        }
+
+        // Check for tool block end
+        if (inToolBlock && currentLine.includes('[step-finish')) {
+          // Save tool block
+          if (toolBlock) {
+            blocks.push(toolBlock);
+          }
+          inToolBlock = false;
+          toolBlock = null;
+          i += 1;
+          continue;
+        }
+
+        // Collect content
+        if (inToolBlock) {
+          // Extract status
+          const statusMatch = currentLine.match(/\*\*Status:\*\*\s*(\w+)/);
+          if (statusMatch && toolBlock) {
+            toolBlock.toolStatus = statusMatch[1];
+          }
+
+          // Extract input
+          if (currentLine.includes('**Input:**')) {
+            i += 1;
+            // Skip ```json or ``` line
+            if (i < lines.length && lines[i].startsWith('```')) {
+              i += 1;
+            }
+            const inputLines: string[] = [];
+            while (i < lines.length && !lines[i].startsWith('```')) {
+              inputLines.push(lines[i]);
+              i += 1;
+            }
+            if (toolBlock) {
+              toolBlock.toolInput = inputLines.join('\n').trim();
+            }
+            continue;
+          }
+
+          // Extract output
+          if (currentLine.includes('**Output:**')) {
+            i += 1;
+            // Skip ``` line
+            if (i < lines.length && lines[i].startsWith('```')) {
+              i += 1;
+            }
+            const outputLines: string[] = [];
+            while (i < lines.length && !lines[i].startsWith('```')) {
+              outputLines.push(lines[i]);
+              i += 1;
+            }
+            if (toolBlock) {
+              toolBlock.toolOutput = outputLines.join('\n').trim();
+            }
+            continue;
+          }
+
+          // Collect other tool block content (simple text output without **Output:** label)
+          if (currentLine.trim() && !currentLine.startsWith('```')) {
+            if (!['**Status:**', '**Input:**', '**Output:**'].some((k) => currentLine.includes(k))) {
+              if (toolBlock && !toolBlock.toolOutput && !toolBlock.toolInput) {
+                if (toolBlock.toolOutput === '') {
+                  toolBlock.toolOutput = currentLine.trim();
+                } else {
+                  toolBlock.toolOutput += '\n' + currentLine.trim();
+                }
+              }
+            }
+          }
+        } else {
+          // Regular message content
+          if (currentLine.trim() || messageLines.length > 0) {
+            messageLines.push(currentLine);
+          }
+        }
+
+        i += 1;
+      }
+
+      // Save remaining message content
+      if (messageLines.length > 0 && !inToolBlock) {
+        const msgContent = messageLines.join('\n').trim();
+        if (msgContent) {
+          blocks.push({
+            type: 'message',
+            timestamp,
+            content: msgContent,
+          });
+        }
+      }
+
+      // Save remaining tool block
+      if (toolBlock) {
+        blocks.push(toolBlock);
+      }
+
+      continue;
+    }
+
+    i += 1;
+  }
+
+  return blocks;
+}
+
 function extractSessionInfo(filePath: string, content: string): SessionInfo | null {
   const sessionMatch = content.match(/# Session:\s*(.+)/);
   const title = sessionMatch ? sessionMatch[1].trim() : 'Unknown Session';
@@ -138,48 +317,19 @@ function extractSessionInfo(filePath: string, content: string): SessionInfo | nu
   const dateMatch = content.match(/\*\*Created:\*\*\s*(.+)/);
   const date = dateMatch ? dateMatch[1].trim() : 'Unknown Date';
 
-  const userRequests: string[] = [];
-  const lines = content.split('\n');
-  let currentMessage: string[] = [];
-  let inUserMessage = false;
+  const blocks = extractFullConversation(content);
 
-  for (const line of lines) {
-    if (line.includes('### 🤖 Assistant')) {
-      if (currentMessage.length > 0 && inUserMessage) {
-        const msg = currentMessage.join('\n').trim();
-        if (msg.length > 5 && !msg.includes('[step-start')) {
-          userRequests.push(msg);
-        }
-      }
-      currentMessage = [];
-      inUserMessage = true;
-    } else if (line.startsWith('### ')) {
-      if (currentMessage.length > 0 && inUserMessage) {
-        const msg = currentMessage.join('\n').trim();
-        if (msg.length > 5 && !msg.includes('[step-start')) {
-          userRequests.push(msg);
-        }
-      }
-      currentMessage = [];
-      inUserMessage = false;
-    } else if (inUserMessage) {
-      if (!/^\*\d{4}-\d{2}-\d{2}/.test(line) && !line.includes('[step-finish')) {
-        currentMessage.push(line);
-      }
+  // Extract user request from first message block
+  let userRequest = '无明确请求';
+  const firstMessage = blocks.find((b) => b.type === 'message');
+  if (firstMessage?.content) {
+    userRequest = firstMessage.content
+      .replace(/\[.*?\]/g, '')
+      .replace(/<.*?>/g, '')
+      .trim();
+    if (userRequest.length > 200) {
+      userRequest = userRequest.substring(0, 200) + '...';
     }
-  }
-
-  if (currentMessage.length > 0 && inUserMessage) {
-    const msg = currentMessage.join('\n').trim();
-    if (msg.length > 5 && !msg.includes('[step-start')) {
-      userRequests.push(msg);
-    }
-  }
-
-  let userRequest = userRequests[0] || '无明确请求';
-  userRequest = userRequest.replace(/\[.*?\]/g, '').replace(/<.*?>/g, '').trim();
-  if (userRequest.length > 200) {
-    userRequest = userRequest.substring(0, 200) + '...';
   }
 
   return {
@@ -304,14 +454,70 @@ function parseDate(dateStr: string): Date {
 
 // ─── QA Document Generator ───────────────────────────────────────────────────
 
-async function generateQADocument(projectDir: string, sessions: SessionInfo[]): Promise<number> {
+function formatConversationBlock(block: ConversationBlock, index: number): string {
+  const lines: string[] = [];
+
+  if (block.type === 'message') {
+    const content = block.content || '';
+
+    // Clean up step markers
+    const cleanContent = content
+      .replace(/\*\[step-start.*?\]\*/g, '')
+      .replace(/\*\[step-finish.*?\]\*/g, '')
+      .trim();
+
+    if (!cleanContent) {
+      return '';
+    }
+
+    // Determine if this is a user request (first message) or assistant reply
+    if (index === 0) {
+      lines.push(`**[${block.timestamp}]** 💭 用户请求`);
+      lines.push(`> ${cleanContent}`);
+    } else {
+      lines.push(`**[${block.timestamp}]** 🤖 助手`);
+      lines.push(`${cleanContent}`);
+    }
+  } else if (block.type === 'tool') {
+    lines.push(`#### 🔧 Tool: ${block.toolName}`);
+
+    if (block.toolStatus) {
+      lines.push(`- **状态**: ${block.toolStatus}`);
+    }
+
+    if (block.toolInput) {
+      // Try to format as JSON if possible
+      try {
+        const inputJson = JSON.parse(block.toolInput);
+        const inputFormatted = JSON.stringify(inputJson, null, 2);
+        lines.push(`- **输入**:`);
+        lines.push(`\`\`\`json`);
+        lines.push(inputFormatted);
+        lines.push(`\`\`\``);
+      } catch {
+        lines.push(`- **输入**: \`${block.toolInput}\``);
+      }
+    }
+
+    if (block.toolOutput) {
+      lines.push(`- **输出**:`);
+      lines.push(`\`\`\``);
+      lines.push(block.toolOutput);
+      lines.push(`\`\`\``);
+    }
+  }
+
+  return lines.join('\n');
+}
+
+async function generateQADocument(projectDir: string, sessions: SessionInfo[], contentMap: Map<string, string>): Promise<number> {
   if (sessions.length === 0) return 0;
 
   const projectName = basename(projectDir);
   const lines: string[] = [];
 
   lines.push(`# ${projectName} 项目开发问答记录\n`);
-  lines.push(`> 本文档整理了 **${projectName}** 项目的开发对话记录，以问答形式呈现关键决策和技术要点。\n`);
+  lines.push(`> 本文档整理了 **${projectName}** 项目的完整开发对话记录，包含所有用户请求、助手回复、工具调用和思考过程。\n`);
   lines.push('---\n');
 
   for (let i = 0; i < sessions.length; i++) {
@@ -320,10 +526,23 @@ async function generateQADocument(projectDir: string, sessions: SessionInfo[]): 
 
     lines.push(`## ${i + 1}. ${s.title}\n`);
     lines.push(`**时间**: ${dateStr}  `);
-    lines.push(`**来源**: \`${s.filename}\`\n`);
-    lines.push(`### Q: 用户请求\n`);
-    lines.push(`> ${s.userRequest}\n`);
-    lines.push(`**概要**: ${s.category}\n`);
+    lines.push(`**来源**: \`${s.filename}\`  `);
+    lines.push(`**分类**: ${s.category}\n`);
+    lines.push(`### 对话记录\n`);
+
+    // Extract full conversation from original content
+    const originalContent = contentMap.get(s.filename);
+    if (originalContent) {
+      const blocks = extractFullConversation(originalContent);
+      for (let idx = 0; idx < blocks.length; idx++) {
+        const formatted = formatConversationBlock(blocks[idx], idx);
+        if (formatted) {
+          lines.push(formatted);
+          lines.push('');
+        }
+      }
+    }
+
     lines.push('---\n');
   }
 
@@ -939,6 +1158,9 @@ export async function regenerateViews(globalSaveDir: string): Promise<void> {
     let projects: ProjectData[];
     let isIncremental = false;
 
+    // Map to store original content for QA doc generation
+    const contentMap = new Map<string, string>();
+
     if (index) {
       // Use incremental scanning with index
       projects = await scanProjectsIncremental(baseDir, index);
@@ -984,7 +1206,20 @@ export async function regenerateViews(globalSaveDir: string): Promise<void> {
     let qaTotal = 0;
     for (const project of projects) {
       const projectDir = join(baseDir, project.name);
-      const count = await generateQADocument(projectDir, project.sessions);
+
+      // Read all original markdown files for this project
+      const mdFiles = await listMdFiles(projectDir);
+      contentMap.clear();
+      for (const filePath of mdFiles) {
+        try {
+          const content = await readFile(filePath, 'utf-8');
+          contentMap.set(basename(filePath), content);
+        } catch {
+          // Skip unreadable files
+        }
+      }
+
+      const count = await generateQADocument(projectDir, project.sessions, contentMap);
       qaTotal += count;
     }
 
