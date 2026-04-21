@@ -3,12 +3,23 @@ import { join } from 'node:path';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+export interface ConversationBlock {
+  type: 'message' | 'tool';
+  timestamp: string;
+  content?: string;
+  toolName?: string;
+  toolStatus?: string;
+  toolInput?: string;
+  toolOutput?: string;
+}
+
 export interface SessionInfo {
   title: string;
   date: string;
   userRequest: string;
   category: string;
   filename: string;
+  conversationBlocks?: ConversationBlock[];
 }
 
 export interface ProjectData {

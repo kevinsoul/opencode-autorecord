@@ -29,6 +29,8 @@ export default tseslint.config(
       'prefer-const': 'error',
       // No console in production (except error/warn)
       'no-console': ['warn', { allow: ['warn', 'error', 'log'] }],
+      // Disable no-useless-escape for regex in strings
+      'no-useless-escape': 'off',
     },
   },
   {

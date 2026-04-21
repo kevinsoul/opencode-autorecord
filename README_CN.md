@@ -26,7 +26,17 @@
 
 7. 不保存到项目目录，集中保存在~/opencode-autorecord
 
-   
+8. **修复点击交互问题**（v1.1.3）：
+   - 修复点击项目卡片无法弹出会话列表的问题
+   - 修复点击会话卡片无法弹出会话记录的问题
+   - 优化搜索过滤功能，支持中文内容搜索
+
+9. **修复主页显示问题**（v1.1.4）：
+   - 移除主页项目卡片下方的会话记录列表
+   - 主页现在只显示项目概览（名称、最后更新时间、会话数量）
+   - 点击项目卡片后，在弹窗中查看完整会话详情
+
+
 
 ## 安装
 
@@ -94,6 +104,94 @@ npm install --save-dev opencode-autorecord
 - 简洁易读的 Markdown 格式
 
 - 支持中文及其他 Unicode 内容
+
+- 智能提取问答对：自动识别 Assistant 时间后的用户问题，以及 `[step-start part]` 到 `[step-end part]` 之间的 AI 思考与回答
+
+- 自动生成问答文档：将对话整理为结构化的 Q&A 格式，便于回顾和知识沉淀
+- 点击会话卡片查看完整对话：在 HTML 概览页中点击任意会话卡片，即可弹出模态框查看完整的对话记录（包含用户请求和助手回复）
+- 优化对话弹窗排版：支持 Markdown 格式渲染（标题、粗体、列表、代码块等），代码块采用深色主题，提升阅读体验
+
+
+
+## CLI 命令行工具
+
+除了作为 OpenCode 插件自动运行外，还提供了 CLI 命令用于手动重新生成视图。
+
+### 安装 CLI
+
+```bash
+npm install -g opencode-autorecord
+```
+
+### 重新生成视图
+
+当你想手动重新生成 HTML 概览页和问答文档时：
+
+```bash
+# 使用全局安装的命令
+opencode-autorecord regenerate ~/opencode-autorecord/your-project
+
+# 或使用 npx（无需全局安装）
+npx opencode-autorecord regenerate ~/opencode-autorecord/your-project
+```
+
+**参数说明：**
+
+- `regenerate`：重新生成命令
+- `<保存目录>`：全局保存目录的路径，通常是 `~/opencode-autorecord/<项目名>`
+
+**功能说明：**
+
+- 扫描指定目录下的所有 Markdown 文件
+- 生成 `opencode-overview.html`（HTML 概览页，包含项目卡片和时间线视图）
+- 为每个项目生成 `对话式问答文档.md`（整理所有对话记录）
+- 如果存在索引文件 `.autorecord-index.json`，将使用增量扫描；否则执行全量扫描并创建新的索引
+
+**示例：**
+
+```bash
+# 重新生成根目录视图（自动检测根目录或项目目录）
+opencode-autorecord regenerate ~/opencode-autorecord
+
+# 也可以传入具体项目目录
+opencode-autorecord regenerate ~/opencode-autorecord/my-project
+
+# 重新生成当前项目的视图（如果在项目目录下）
+opencode-autorecord regenerate ./conversations
+```
+
+
+
+## 问答文档格式
+
+插件会自动生成 `对话式问答文档.md`，将对话整理为结构化的问答对：
+
+### 提取规则
+
+1. **用户问题**：Assistant 时间戳后的文本内容（`[step-start part]` 之前的部分）
+2. **AI 回答**：`[step-start part]` 到 `[step-end part]` 之间的内容（包含 AI 的思考过程和最终回答）
+3. **工具调用**：`#### 🔧 Tool:` 开头的工具执行块会完整保留
+
+### 示例结构
+
+```markdown
+**[2024-01-15 10:30:45]** 💭 用户请求
+> 如何优化 React 组件的渲染性能？
+
+**[2024-01-15 10:30:46]** 🤖 助手
+首先，我们需要分析组件的渲染瓶颈...
+
+#### 🔧 Tool: search
+- **状态**: success
+- **输入**: `{"query": "React performance optimization"}`
+- **输出**: ...
+```
+
+### 使用建议
+
+- 问答文档适合用于**知识沉淀**和**团队分享**
+- 可以通过搜索快速定位历史问题和解决方案
+- 配合 HTML 概览页使用，获得更好的浏览体验
 
 
 
