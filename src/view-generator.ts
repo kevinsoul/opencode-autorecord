@@ -1,5 +1,5 @@
 import { readdir, readFile, writeFile, appendFile, stat } from 'node:fs/promises';
-import { join, dirname, basename } from 'node:path';
+import { join, basename } from 'node:path';
 import {
   loadIndex,
   saveIndex,
@@ -1343,8 +1343,7 @@ function buildHtml(projects: ProjectData[], totalSessions: number, contentMap: M
 
 // ─── Main Entry Point ────────────────────────────────────────────────────────
 
-export async function regenerateViews(globalSaveDir: string): Promise<void> {
-  const baseDir = dirname(globalSaveDir);
+export async function regenerateViews(baseDir: string): Promise<void> {
   const logPath = join(baseDir, '.autorecord-views.log');
 
   try {

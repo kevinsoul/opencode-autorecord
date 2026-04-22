@@ -139,7 +139,10 @@ npx opencode-autorecord regenerate ~/opencode-autorecord/your-project
 **示例：**
 
 ```bash
-# 重新生成 my-project 项目的视图
+# 重新生成根目录视图（自动检测根目录或项目目录）
+opencode-autorecord regenerate ~/opencode-autorecord
+
+# 也可以传入具体项目目录
 opencode-autorecord regenerate ~/opencode-autorecord/my-project
 
 # 重新生成当前项目的视图（如果在项目目录下）

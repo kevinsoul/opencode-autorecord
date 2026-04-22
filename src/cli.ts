@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { resolve } from 'node:path';
+import { resolve, dirname, join } from 'node:path';
 import { existsSync, statSync } from 'node:fs';
 import { regenerateViews } from './view-generator.js';
 
@@ -57,14 +57,18 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  console.log(`开始重新生成视图: ${resolvedPath}`);
+  // Determine if the provided path is the root directory or a project directory
+  const hasIndexFile = existsSync(join(resolvedPath, '.autorecord-index.json'));
+  const baseDir = hasIndexFile ? resolvedPath : dirname(resolvedPath);
+
+  console.log(`开始重新生成视图: ${baseDir}`);
   console.log('扫描 Markdown 文件并生成 HTML 概览页和问答文档...\n');
 
   try {
-    await regenerateViews(resolvedPath);
+    await regenerateViews(baseDir);
     console.log('\n✓ 视图重新生成完成！');
-    console.log(`  HTML 概览页: ${resolvedPath}/../opencode-overview.html`);
-    console.log(`  问答文档: ${resolvedPath}/*/对话式问答文档.md`);
+    console.log(`  HTML 概览页: ${join(baseDir, 'opencode-overview.html')}`);
+    console.log(`  问答文档: ${join(baseDir, '*', '对话式问答文档.md')}`);
   } catch (error) {
     console.error('\n✗ 视图生成失败:', error instanceof Error ? error.message : String(error));
     process.exit(1);

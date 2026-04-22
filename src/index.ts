@@ -16,6 +16,7 @@ import {
   writeToSecondaryLocation,
   saveImageToSecondaryLocation,
 } from './file-manager.js';
+import { dirname } from 'node:path';
 import {
   createSession,
   getSession,
@@ -108,7 +109,7 @@ function scheduleViewRegeneration(dir: string, delay: number): void {
   viewDebounceTimers.set(
     dir,
     setTimeout(() => {
-      void regenerateViews(dir).catch(() => {
+      void regenerateViews(dirname(dir)).catch(() => {
         // View generation errors are logged internally
       });
       viewDebounceTimers.delete(dir);
