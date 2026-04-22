@@ -98,6 +98,7 @@ npm install --save-dev opencode-autorecord
 - 智能提取问答对：自动识别 Assistant 时间后的用户问题，以及 `[step-start part]` 到 `[step-end part]` 之间的 AI 思考与回答
 
 - 自动生成问答文档：将对话整理为结构化的 Q&A 格式，便于回顾和知识沉淀
+- 点击会话卡片查看完整对话：在 HTML 概览页中点击任意会话卡片，即可弹出模态框查看完整的对话记录（包含用户请求和助手回复）
 
 
 

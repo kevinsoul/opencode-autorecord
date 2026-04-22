@@ -661,7 +661,7 @@ function buildProjectCards(projects: ProjectData[]): string {
     const sessionsHtml = p.sessions.slice(0, 3).map((s) => {
       const catColor = CATEGORY_COLORS[s.category] || CATEGORY_COLORS['开发讨论'];
       return `
-        <div class="session-item" data-title="${escapeHtml(s.title)}" data-request="${escapeHtml(s.userRequest)}">
+        <div class="session-item" data-title="${escapeHtml(s.title)}" data-request="${escapeHtml(s.userRequest)}" onclick="openSessionModal('${escapeHtml(p.name)}', '${escapeHtml(s.title)}')">
           <div class="session-title">${escapeHtml(s.title)}</div>
           <div class="session-meta">
             <span class="session-date">${formatDate(s.date)}</span>
@@ -741,7 +741,7 @@ function escapeHtml(text: string): string {
     .replace(/'/g, '&#039;');
 }
 
-function buildHtml(projects: ProjectData[], totalSessions: number): string {
+function buildHtml(projects: ProjectData[], totalSessions: number, contentMap: Map<string, string>): string {
   const generatedTime = new Date().toLocaleString('zh-CN');
   const projectCount = projects.length;
   const categoryStats = computeCategoryStats(projects);
@@ -757,13 +757,33 @@ function buildHtml(projects: ProjectData[], totalSessions: number): string {
       title: p.name,
       lastModified: formatTimestamp(p.lastModified),
       color: getProjectColor(p.name),
-      sessions: p.sessions.map((s) => ({
-        title: s.title,
-        request: s.userRequest,
-        date: s.date,
-        category: s.category,
-        categoryStyle: `background:${(CATEGORY_COLORS[s.category] || CATEGORY_COLORS['开发讨论']).bg};color:${(CATEGORY_COLORS[s.category] || CATEGORY_COLORS['开发讨论']).text}`,
-      })),
+      sessions: p.sessions.map((s) => {
+        // Extract full conversation blocks for this session
+        const qaBlocks: Array<{ timestamp: string; role: 'user' | 'assistant'; content: string }> = [];
+        const originalContent = contentMap.get(s.filename);
+        if (originalContent) {
+          const blocks = extractFullConversation(originalContent);
+          let isFirstMessage = true;
+          for (const block of blocks) {
+            if (block.type === 'message' && block.content) {
+              qaBlocks.push({
+                timestamp: block.timestamp || s.date,
+                role: isFirstMessage ? 'user' : 'assistant',
+                content: block.content,
+              });
+              isFirstMessage = false;
+            }
+          }
+        }
+        return {
+          title: s.title,
+          request: s.userRequest,
+          date: s.date,
+          category: s.category,
+          categoryStyle: `background:${(CATEGORY_COLORS[s.category] || CATEGORY_COLORS['开发讨论']).bg};color:${(CATEGORY_COLORS[s.category] || CATEGORY_COLORS['开发讨论']).text}`,
+          qaBlocks,
+        };
+      }),
     };
   }
 
@@ -961,6 +981,37 @@ function buildHtml(projects: ProjectData[], totalSessions: number): string {
     }
     .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.4); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); z-index: 1000; display: none; justify-content: center; align-items: center; opacity: 0; transition: opacity 0.3s ease; }
     .modal-overlay.active { display: flex; opacity: 1; }
+    .session-modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.4); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); z-index: 1001; display: none; justify-content: center; align-items: center; opacity: 0; transition: opacity 0.3s ease; }
+    .session-modal-overlay.active { display: flex; opacity: 1; }
+    .session-modal-container { background: linear-gradient(135deg, rgba(255,255,255,0.95), rgba(255,255,255,0.9)); backdrop-filter: saturate(200%) blur(30px); -webkit-backdrop-filter: saturate(200%) blur(30px); border-radius: 28px; border: 1px solid rgba(255,255,255,0.6); box-shadow: 0 25px 80px rgba(0,0,0,0.15), 0 10px 30px rgba(0,0,0,0.1), inset 0 1px 0 rgba(255,255,255,0.9); width: 90%; max-width: 900px; max-height: 85vh; overflow: hidden; transform: scale(0.9) translateY(20px); transition: transform 0.4s cubic-bezier(0.4,0,0.2,1); display: flex; flex-direction: column; }
+    .session-modal-overlay.active .session-modal-container { transform: scale(1) translateY(0); }
+    .session-modal-header { padding: 32px 40px 24px; background: var(--apple-white); border-bottom: 1px solid var(--apple-gray-2); display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; }
+    .session-modal-title-section { display: flex; align-items: center; gap: 16px; flex: 1; }
+    .session-modal-icon { width: 48px; height: 48px; border-radius: 14px; display: flex; align-items: center; justify-content: center; color: white; flex-shrink: 0; background: var(--project-accent-color, var(--apple-blue)); }
+    .session-modal-title-content h2 { font-family: var(--font-display); font-size: 24px; font-weight: 600; letter-spacing: -0.021em; margin-bottom: 6px; }
+    .session-modal-meta { font-size: 14px; color: var(--apple-gray-4); }
+    .session-modal-close { width: 36px; height: 36px; border-radius: 50%; background: var(--apple-gray-1); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; color: var(--apple-gray-5); transition: all 0.2s ease; flex-shrink: 0; }
+    .session-modal-close:hover { background: var(--apple-gray-2); color: var(--apple-black); }
+    .session-modal-content { padding: 32px 40px 40px; overflow-y: auto; flex: 1; background: var(--apple-gray-1); }
+    .session-modal-request { background: var(--apple-white); border-radius: 16px; padding: 24px; margin-bottom: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); border: 1px solid var(--apple-gray-2); }
+    .session-modal-label { font-size: 12px; font-weight: 600; color: var(--apple-gray-4); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 12px; }
+    .session-modal-request-text { font-size: 15px; color: var(--apple-black); line-height: 1.6; }
+    .session-modal-divider { height: 1px; background: var(--apple-gray-2); margin: 24px 0; }
+    .session-modal-qa { display: flex; flex-direction: column; gap: 16px; }
+    .session-modal-qa-item { background: var(--apple-white); border-radius: 16px; padding: 20px 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); border: 1px solid var(--apple-gray-2); }
+    .session-modal-qa-item .qa-timestamp { font-size: 12px; color: var(--apple-gray-4); margin-bottom: 8px; }
+    .session-modal-qa-item .qa-role { font-size: 13px; font-weight: 600; color: var(--apple-blue); margin-bottom: 8px; }
+    .session-modal-qa-item .qa-content { font-size: 14px; color: var(--apple-black); line-height: 1.6; white-space: pre-wrap; }
+    .session-modal-qa-item .qa-content code { background: var(--apple-gray-1); padding: 2px 6px; border-radius: 4px; font-family: monospace; font-size: 13px; }
+    .session-modal-qa-item .qa-content pre { background: var(--apple-gray-1); padding: 16px; border-radius: 8px; overflow-x: auto; margin: 8px 0; }
+    .session-modal-qa-item .qa-content pre code { background: none; padding: 0; }
+    @media (max-width: 768px) {
+      .session-modal-container { width: 95%; max-height: 90vh; border-radius: 24px; }
+      .session-modal-header { padding: 24px 24px 20px; }
+      .session-modal-icon { width: 40px; height: 40px; }
+      .session-modal-title-content h2 { font-size: 20px; }
+      .session-modal-content { padding: 24px 24px 32px; }
+    }
     .modal-container {
       background: linear-gradient(135deg, rgba(255,255,255,0.95), rgba(255,255,255,0.9));
       backdrop-filter: saturate(200%) blur(30px); -webkit-backdrop-filter: saturate(200%) blur(30px);
@@ -1065,6 +1116,33 @@ function buildHtml(projects: ProjectData[], totalSessions: number): string {
     </div>
   </div>
 
+  <div class="session-modal-overlay" id="sessionModalOverlay" onclick="closeSessionModal(event)">
+    <div class="session-modal-container" onclick="event.stopPropagation()">
+      <div class="session-modal-header">
+        <div class="session-modal-title-section">
+          <div class="session-modal-icon" id="sessionModalIcon" style="background: var(--apple-blue)">
+            <i data-lucide="message-square" style="width:20px;height:20px;color:white"></i>
+          </div>
+          <div class="session-modal-title-content">
+            <h2 id="sessionModalTitle">会话标题</h2>
+            <span class="session-modal-meta" id="sessionModalMeta">项目名 · 分类 · 日期</span>
+          </div>
+        </div>
+        <button class="session-modal-close" onclick="closeSessionModal()">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="session-modal-content" id="sessionModalContent">
+        <div class="session-modal-request">
+          <div class="session-modal-label">用户请求</div>
+          <div class="session-modal-request-text" id="sessionModalRequest"></div>
+        </div>
+        <div class="session-modal-divider"></div>
+        <div class="session-modal-qa" id="sessionModalQA"></div>
+      </div>
+    </div>
+  </div>
+
   <footer><p class="footer-text">Generated by opencode-autorecord plugin</p></footer>
 
   <script>
@@ -1088,6 +1166,55 @@ function buildHtml(projects: ProjectData[], totalSessions: number): string {
       });
     }
 
+    function openSessionModal(projectName, sessionTitle) {
+      const project = projectsData[projectName];
+      if (!project) return;
+      
+      const session = project.sessions.find(s => s.title === sessionTitle);
+      if (!session) return;
+      
+      document.getElementById('sessionModalTitle').textContent = session.title;
+      document.getElementById('sessionModalMeta').textContent = projectName + ' · ' + session.category + ' · ' + session.date;
+      document.getElementById('sessionModalIcon').style.background = project.color;
+      document.getElementById('sessionModalRequest').textContent = session.request;
+      
+      // Generate QA blocks from session content
+      let qaHtml = '';
+      if (session.qaBlocks && session.qaBlocks.length > 0) {
+        session.qaBlocks.forEach(block => {
+          qaHtml += '<div class="session-modal-qa-item">';
+          qaHtml += '<div class="qa-timestamp">' + escapeHtml(block.timestamp) + '</div>';
+          qaHtml += '<div class="qa-role">' + (block.role === 'user' ? '💭 用户' : '🤖 助手') + '</div>';
+          qaHtml += '<div class="qa-content">' + formatQAContent(block.content) + '</div>';
+          qaHtml += '</div>';
+        });
+      } else {
+        qaHtml = '<div class="session-modal-qa-item"><div class="qa-content" style="color:var(--apple-gray-4)">暂无详细对话记录</div></div>';
+      }
+      document.getElementById('sessionModalQA').innerHTML = qaHtml;
+      
+      const overlay = document.getElementById('sessionModalOverlay');
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+    
+    function closeSessionModal(event) {
+      if (event && event.target !== event.currentTarget) return;
+      document.getElementById('sessionModalOverlay').classList.remove('active');
+      document.body.style.overflow = '';
+    }
+    
+    function formatQAContent(content) {
+      // Simple markdown-like formatting
+      var bt = String.fromCharCode(96);
+      var tripleBt = bt + bt + bt;
+      let formatted = escapeHtml(content);
+      formatted = formatted.replace(new RegExp(tripleBt+'([\\s\\S]*?)'+tripleBt, 'g'), '<pre><code>$1</code></pre>');
+      formatted = formatted.replace(new RegExp(bt+'([^'+bt+']+)'+bt, 'g'), '<code>$1</code>');
+      formatted = formatted.replace(/\\n/g, '<br>');
+      return formatted;
+    }
+    
     function openModal(projectName) {
       const project = projectsData[projectName];
       if (!project) return;
@@ -1186,7 +1313,12 @@ function buildHtml(projects: ProjectData[], totalSessions: number): string {
       filterProjects();
     }
 
-    document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+    document.addEventListener('keydown', e => { 
+      if (e.key === 'Escape') {
+        closeModal();
+        closeSessionModal();
+      }
+    });
     document.addEventListener('DOMContentLoaded', function() {
       initProjectsData();
       if (typeof lucide !== 'undefined') {
@@ -1220,9 +1352,6 @@ export async function regenerateViews(globalSaveDir: string): Promise<void> {
     let index = await loadIndex(baseDir);
     let projects: ProjectData[];
     let isIncremental = false;
-
-    // Map to store original content for QA doc generation
-    const contentMap = new Map<string, string>();
 
     if (index) {
       // Use incremental scanning with index
@@ -1260,8 +1389,23 @@ export async function regenerateViews(globalSaveDir: string): Promise<void> {
 
     const totalSessions = projects.reduce((sum, p) => sum + p.count, 0);
 
-    // Generate HTML overview
-    const htmlContent = buildHtml(projects, totalSessions);
+    // Read all original markdown content for all projects first (needed for HTML and QA)
+    const allContentMap = new Map<string, string>();
+    for (const project of projects) {
+      const projectDir = join(baseDir, project.name);
+      const mdFiles = await listMdFiles(projectDir);
+      for (const filePath of mdFiles) {
+        try {
+          const content = await readFile(filePath, 'utf-8');
+          allContentMap.set(basename(filePath), content);
+        } catch {
+          // Skip unreadable files
+        }
+      }
+    }
+
+    // Generate HTML overview (with full conversation data)
+    const htmlContent = buildHtml(projects, totalSessions, allContentMap);
     const htmlPath = join(baseDir, 'opencode-overview.html');
     await writeFile(htmlPath, htmlContent, 'utf-8');
 
@@ -1269,20 +1413,7 @@ export async function regenerateViews(globalSaveDir: string): Promise<void> {
     let qaTotal = 0;
     for (const project of projects) {
       const projectDir = join(baseDir, project.name);
-
-      // Read all original markdown files for this project
-      const mdFiles = await listMdFiles(projectDir);
-      contentMap.clear();
-      for (const filePath of mdFiles) {
-        try {
-          const content = await readFile(filePath, 'utf-8');
-          contentMap.set(basename(filePath), content);
-        } catch {
-          // Skip unreadable files
-        }
-      }
-
-      const count = await generateQADocument(projectDir, project.sessions, contentMap);
+      const count = await generateQADocument(projectDir, project.sessions, allContentMap);
       qaTotal += count;
     }
 
