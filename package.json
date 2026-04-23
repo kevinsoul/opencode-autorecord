@@ -1,6 +1,6 @@
 {
     "name": "opencode-autorecord",
-    "version": "1.1.4",
+    "version": "1.0.16-beta.2",
     "description": "OpenCode plugin - automatically save conversation records to markdown files",
     "type": "module",
     "main": "./dist/index.js",
@@ -43,7 +43,8 @@
     },
     "dependencies": {
         "@opencode-ai/plugin": "^1.14.19",
-        "@opencode-ai/sdk": "^1.14.19"
+        "@opencode-ai/sdk": "^1.14.19",
+        "opencode-autorecord": "^1.0.14-beta.0"
     },
     "devDependencies": {
         "@types/node": "^22.0.0",
