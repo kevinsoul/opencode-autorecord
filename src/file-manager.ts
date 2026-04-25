@@ -1,4 +1,4 @@
-import { mkdir, writeFile, rename, access, unlink } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, rename, unlink } from 'node:fs/promises';
 import { join, dirname, basename } from 'node:path';
 import { homedir } from 'node:os';
 import type { PluginConfig } from './types.js';
@@ -6,6 +6,30 @@ import type { PluginConfig } from './types.js';
 const INVALID_FILENAME_CHARS = /[/\\:*?"<>|]/g;
 const MULTIPLE_HYPHENS = /-+/g;
 const LEADING_TRAILING_HYPHENS = /^-+|-+$/g;
+
+const fileLocks = new Map<string, Promise<void>>();
+
+async function withFileLock<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
+  const prevLock = fileLocks.get(filePath);
+  let release: (() => void) | undefined;
+  const lockPromise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  fileLocks.set(filePath, lockPromise);
+
+  if (prevLock) {
+    await prevLock;
+  }
+
+  try {
+    return await fn();
+  } finally {
+    release?.();
+    if (fileLocks.get(filePath) === lockPromise) {
+      fileLocks.delete(filePath);
+    }
+  }
+}
 
 export async function ensureDirectory(
   baseDir: string,
@@ -56,52 +80,117 @@ export function sanitizeTopic(topic: string, maxLength: number): string {
   return sanitized || 'untitled';
 }
 
-export async function writeSessionFile(
-  filePath: string,
-  content: string
-): Promise<boolean> {
-  const tempPath = `${filePath}.tmp`;
-  try {
-    await mkdir(dirname(filePath), { recursive: true });
-    await writeFile(tempPath, content, 'utf-8');
-    await rename(tempPath, filePath);
-    return true;
-  } catch (error) {
-    console.error(`[autorecord] Failed to write file ${filePath}:`, error);
-    try {
-      await unlink(tempPath);
-    } catch {
-      // Ignore cleanup errors
+function parseTopicBlocks(content: string): Array<{ id: string; content: string }> {
+  const blocks: Array<{ id: string; content: string }> = [];
+  const lines = content.split('\n');
+  let currentId: string | null = null;
+  let currentLines: string[] = [];
+
+  for (const line of lines) {
+    const match = line.match(/^<!-- AUTORECORD-SESSION-BLOCK: ([^>]+) -->$/);
+    if (match) {
+      if (currentId !== null) {
+        blocks.push({ id: currentId, content: currentLines.join('\n').trimEnd() });
+      }
+      currentId = match[1];
+      currentLines = [];
+    } else if (currentId !== null) {
+      currentLines.push(line);
     }
-    return false;
   }
+
+  if (currentId !== null) {
+    blocks.push({ id: currentId, content: currentLines.join('\n').trimEnd() });
+  }
+
+  // Deduplicate: keep the last occurrence of each session-id
+  const seen = new Set<string>();
+  const deduped: Array<{ id: string; content: string }> = [];
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const block = blocks[i];
+    if (!seen.has(block.id)) {
+      seen.add(block.id);
+      deduped.unshift(block);
+    }
+  }
+
+  return deduped;
 }
 
-export async function fileExists(filePath: string): Promise<boolean> {
-  try {
-    await access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export async function generateUniqueFilename(
-  dir: string,
+function buildTopicFile(
   topic: string,
-  createdAt: Date,
-  config: PluginConfig
-): Promise<string> {
-  const baseFilename = generateFilename(topic, createdAt, config);
-  const basePath = join(dir, baseFilename);
+  blocks: Array<{ id: string; content: string }>
+): string {
+  const lines: string[] = [];
+  lines.push(`# Topic: ${topic}`);
+  lines.push('');
+  lines.push('---');
 
-  if (!(await fileExists(basePath))) {
-    return basePath;
+  for (const block of blocks) {
+    lines.push('');
+    lines.push(`<!-- AUTORECORD-SESSION-BLOCK: ${block.id} -->`);
+    lines.push(block.content);
   }
 
-  const suffix = Math.random().toString(36).substring(2, 6);
-  const nameWithoutExt = baseFilename.replace('.md', '');
-  return join(dir, `${nameWithoutExt}-${suffix}.md`);
+  let content = lines.join('\n');
+
+  // Replace newlines inside <details>...</details> with <br>
+  content = content.replace(/<details>([\s\S]*?)<\/details>/g, (_match, inner) => {
+    return `<details>${inner.replace(/\n/g, '<br>')}</details>`;
+  });
+
+  return content;
+}
+
+export async function saveSessionToTopicFile(
+  filePath: string,
+  sessionId: string,
+  content: string,
+  topic: string
+): Promise<boolean> {
+  return withFileLock(filePath, async () => {
+    try {
+      await mkdir(dirname(filePath), { recursive: true });
+
+      let existingContent = '';
+      try {
+        existingContent = await readFile(filePath, 'utf-8');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw error;
+        }
+      }
+
+      const blocks = parseTopicBlocks(existingContent);
+      const existingIdx = blocks.findIndex((b) => b.id === sessionId);
+
+      if (existingIdx >= 0) {
+        blocks[existingIdx] = { id: sessionId, content };
+      } else {
+        blocks.push({ id: sessionId, content });
+      }
+
+      const newContent = buildTopicFile(topic, blocks);
+
+      const tempPath = `${filePath}.tmp`;
+      try {
+        await writeFile(tempPath, newContent, 'utf-8');
+        await rename(tempPath, filePath);
+        return true;
+      } catch (error) {
+        console.error(`[autorecord] Failed to write file ${filePath}:`, error);
+        try {
+          await unlink(tempPath);
+        } catch {
+          // Ignore cleanup errors
+        }
+        return false;
+      }
+    } catch (error) {
+      console.error(`[autorecord] Failed to save session to ${filePath}:`, error);
+      return false;
+    }
+  });
 }
 
 const BASE64_DATA_URL_REGEX = /^data:image\/([a-zA-Z]+);base64,(.+)$/;
@@ -176,20 +265,6 @@ export async function ensureGlobalDirectory(
       error
     );
     return null;
-  }
-}
-
-export async function writeToSecondaryLocation(
-  primaryFilePath: string,
-  globalSaveDir: string,
-  content: string
-): Promise<void> {
-  try {
-    const filename = basename(primaryFilePath);
-    const secondaryPath = join(globalSaveDir, filename);
-    await writeSessionFile(secondaryPath, content);
-  } catch (error) {
-    console.error(`[autorecord] Failed to write to secondary location:`, error);
   }
 }
 

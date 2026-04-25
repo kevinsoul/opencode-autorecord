@@ -1,19 +1,30 @@
 import type { Plugin } from '@opencode-ai/plugin';
-import type { Event } from '@opencode-ai/sdk';
+import type {
+  Event,
+  EventSessionCreated,
+  EventSessionUpdated,
+  EventSessionDeleted,
+  EventSessionIdle,
+  EventSessionCompacted,
+  EventMessagePartUpdated,
+  Part,
+  OpencodeClient,
+  SessionMessagesResponse,
+} from '@opencode-ai/sdk';
 import {
   DEFAULT_CONFIG,
   type MessageData,
   type PartData,
+  type FilePartData,
   type ChildSessionData,
 } from './types.js';
 import {
-  writeSessionFile,
+  saveSessionToTopicFile,
   isBase64ImageUrl,
   saveImageFromBase64,
   generateFilename,
   getGlobalSaveDirectory,
   ensureGlobalDirectory,
-  writeToSecondaryLocation,
   saveImageToSecondaryLocation,
 } from './file-manager.js';
 import { dirname } from 'node:path';
@@ -26,75 +37,6 @@ import {
 } from './session-tracker.js';
 import { formatSession, extractTopicFromMessage } from './formatter.js';
 import { regenerateViews } from './view-generator.js';
-
-interface SessionCreatedEvent {
-  type: 'session.created';
-  properties: {
-    info: {
-      id: string;
-      parentID?: string;
-      title?: string;
-    };
-  };
-}
-
-interface SessionIdleEvent {
-  type: 'session.idle';
-  properties: {
-    sessionID: string;
-  };
-}
-
-interface SessionDeletedEvent {
-  type: 'session.deleted';
-  properties: {
-    info: {
-      id: string;
-    };
-  };
-}
-
-interface SessionUpdatedEvent {
-  type: 'session.updated';
-  properties: {
-    info: {
-      id: string;
-      title?: string;
-    };
-  };
-}
-
-type OpencodeClient = {
-  session: {
-    messages: (options: {
-      path: { id: string };
-      query: { directory: string };
-    }) => Promise<{ data?: RawMessage[] }>;
-  };
-};
-
-interface RawMessage {
-  id: string;
-  role: 'user' | 'assistant';
-  time?: { created?: number };
-}
-
-interface RawPart {
-  id: string;
-  type: string;
-  text?: string;
-  tool?: string;
-  state?: {
-    status: string;
-    input?: Record<string, unknown>;
-    output?: string;
-    title?: string;
-    error?: string;
-  };
-  filename?: string;
-  url?: string;
-  mime?: string;
-}
 
 const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const viewDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -119,7 +61,7 @@ function scheduleViewRegeneration(dir: string, delay: number): void {
 
 const plugin: Plugin = async (input) => {
   try {
-    const { directory } = input;
+    const { directory, client } = input;
 
     const globalPath = getGlobalSaveDirectory(directory);
     if (globalPath) {
@@ -129,7 +71,7 @@ const plugin: Plugin = async (input) => {
     const hooks = {
       event: async ({ event }: { event: Event }): Promise<void> => {
         try {
-          await handleEvent(event, input, globalSaveDir);
+          await handleEvent(event, client, directory, globalSaveDir);
         } catch {
           // Silently ignore event handling errors to not affect other plugins
         }
@@ -144,34 +86,38 @@ const plugin: Plugin = async (input) => {
 
 async function handleEvent(
   event: Event,
-  input: { client: unknown; directory: string },
+  client: OpencodeClient,
+  directory: string,
   globalSaveDir: string | null
 ): Promise<void> {
-  const client = input.client as unknown as OpencodeClient;
-  const directory = input.directory;
-
   switch (event.type) {
     case 'session.created':
-      handleSessionCreated(event as SessionCreatedEvent);
+      handleSessionCreated(event as EventSessionCreated);
       break;
     case 'session.updated':
-      handleSessionUpdated(event as SessionUpdatedEvent);
+      handleSessionUpdated(event as EventSessionUpdated);
       break;
     case 'session.idle':
-      handleSessionIdle(event as SessionIdleEvent, client, directory, globalSaveDir);
+      handleSessionIdle(event as EventSessionIdle, client, directory, globalSaveDir);
       break;
     case 'session.deleted':
       await handleSessionDeleted(
-        event as SessionDeletedEvent,
+        event as EventSessionDeleted,
         client,
         directory,
         globalSaveDir
       );
       break;
+    case 'message.part.updated':
+      handleMessagePartUpdated(event as EventMessagePartUpdated, client, directory, globalSaveDir);
+      break;
+    case 'session.compacted':
+      await handleSessionCompacted(event as EventSessionCompacted, client, directory, globalSaveDir);
+      break;
   }
 }
 
-function handleSessionCreated(event: SessionCreatedEvent): void {
+function handleSessionCreated(event: EventSessionCreated): void {
   const { info } = event.properties;
   if (!info?.id) return;
 
@@ -182,7 +128,7 @@ function handleSessionCreated(event: SessionCreatedEvent): void {
   }
 }
 
-function handleSessionUpdated(event: SessionUpdatedEvent): void {
+function handleSessionUpdated(event: EventSessionUpdated): void {
   const { info } = event.properties;
   if (!info?.id) return;
 
@@ -191,15 +137,49 @@ function handleSessionUpdated(event: SessionUpdatedEvent): void {
   }
 }
 
-function handleSessionIdle(
-  event: SessionIdleEvent,
+function handleMessagePartUpdated(
+  event: EventMessagePartUpdated,
   client: OpencodeClient,
   directory: string,
   globalSaveDir: string | null
 ): void {
+  const { part } = event.properties;
+  if (!part?.sessionID) return;
+
+  scheduleSave(part.sessionID, client, directory, globalSaveDir);
+}
+
+async function handleSessionCompacted(
+  event: EventSessionCompacted,
+  client: OpencodeClient,
+  directory: string,
+  globalSaveDir: string | null
+): Promise<void> {
   const { sessionID } = event.properties;
   if (!sessionID) return;
 
+  const session = getSession(sessionID);
+  if (!session) return;
+
+  const targetID = session.parentID || sessionID;
+
+  // 取消待定的 debounce 保存
+  const timer = debounceTimers.get(targetID);
+  if (timer) {
+    clearTimeout(timer);
+    debounceTimers.delete(targetID);
+  }
+
+  // 立即保存
+  await saveSessionToFile(targetID, client, directory, globalSaveDir);
+}
+
+function scheduleSave(
+  sessionID: string,
+  client: OpencodeClient,
+  directory: string,
+  globalSaveDir: string | null
+): void {
   const session = getSession(sessionID);
   if (!session) return;
 
@@ -219,8 +199,20 @@ function handleSessionIdle(
   );
 }
 
+function handleSessionIdle(
+  event: EventSessionIdle,
+  client: OpencodeClient,
+  directory: string,
+  globalSaveDir: string | null
+): void {
+  const { sessionID } = event.properties;
+  if (!sessionID) return;
+
+  scheduleSave(sessionID, client, directory, globalSaveDir);
+}
+
 async function handleSessionDeleted(
-  event: SessionDeletedEvent,
+  event: EventSessionDeleted,
   client: OpencodeClient,
   directory: string,
   globalSaveDir: string | null
@@ -315,7 +307,7 @@ async function saveSessionToFile(
 
     const rejectedCount = childResults.length - childData.length;
     if (rejectedCount > 0) {
-      console.error(`[autorecord] Failed to read ${rejectedCount} child session(s) for ${sessionID}`);
+      void logApp(client, 'error', `Failed to read ${rejectedCount} child session(s) for ${sessionID}`);
     }
 
     if (globalSaveDir) {
@@ -326,6 +318,7 @@ async function saveSessionToFile(
     }
 
     const content = formatSession(
+      sessionID,
       title,
       session.createdAt,
       messages,
@@ -335,11 +328,7 @@ async function saveSessionToFile(
     if (globalSaveDir) {
       const filename = generateFilename(title || 'untitled', session.createdAt, DEFAULT_CONFIG);
       const globalFilePath = `${globalSaveDir}/${filename}`;
-      await writeSessionFile(globalFilePath, content);
-
-      if (filePath) {
-        await writeToSecondaryLocation(filePath, globalSaveDir, content);
-      }
+      await saveSessionToTopicFile(globalFilePath, sessionID, content, title || 'untitled');
 
       // Trigger view regeneration for main sessions
       if (!session.parentID && DEFAULT_CONFIG.view.enabled) {
@@ -347,20 +336,39 @@ async function saveSessionToFile(
       }
     }
   } catch (error) {
-    console.error(`[autorecord] Error saving session ${sessionID}:`, error);
+    void logApp(client, 'error', `Error saving session ${sessionID}`, {
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 
-function convertMessages(rawMessages: RawMessage[]): MessageData[] {
-  return rawMessages.map((msg) => {
-    const rawParts = (msg as unknown as { parts?: RawPart[] }).parts || [];
-    return {
-      id: msg.id,
-      role: msg.role,
-      parts: rawParts.map(convertPart),
-      createdAt: msg.time?.created || Date.now(),
-    };
-  });
+function logApp(
+  client: OpencodeClient,
+  level: 'debug' | 'info' | 'warn' | 'error',
+  message: string,
+  extra?: Record<string, unknown>
+): Promise<void> {
+  return client.app
+    .log({
+      body: { service: 'opencode-autorecord', level, message, extra },
+    })
+    .then(() => undefined)
+    .catch(() => {
+      // Ignore logging failures to not affect plugin flow
+    });
+}
+
+function convertMessages(rawMessages: SessionMessagesResponse): MessageData[] {
+  return rawMessages.map(({ info, parts }) => ({
+    id: info.id,
+    role: info.role,
+    parts: parts.map(convertPart),
+    createdAt: info.time?.created || Date.now(),
+  }));
+}
+
+function isFilePart(part: PartData): part is FilePartData {
+  return part.type === 'file' && 'url' in part && 'mime' in part;
 }
 
 async function processImagesInMessages(
@@ -373,50 +381,48 @@ async function processImagesInMessages(
   let imageIndex = 0;
   for (const message of messages) {
     for (const part of message.parts) {
-      if (part.type === 'file' && 'url' in part && 'mime' in part) {
-        const filePart = part as { type: 'file'; url: string; mime: string; localPath?: string };
-        if (filePart.mime.startsWith('image/') && isBase64ImageUrl(filePart.url)) {
-          const localPath = await saveImageFromBase64(filePart.url, mdFilePath, sessionTitle, createdAt, imageIndex);
-          if (localPath) {
-            filePart.localPath = localPath;
+      if (!isFilePart(part)) continue;
+      if (part.mime.startsWith('image/') && isBase64ImageUrl(part.url)) {
+        const localPath = await saveImageFromBase64(part.url, mdFilePath, sessionTitle, createdAt, imageIndex);
+        if (localPath) {
+          part.localPath = localPath;
 
-            if (globalSaveDir) {
-              await saveImageToSecondaryLocation(filePart.url, globalSaveDir, sessionTitle, createdAt, imageIndex);
-            }
-
-            imageIndex++;
+          if (globalSaveDir) {
+            await saveImageToSecondaryLocation(part.url, globalSaveDir, sessionTitle, createdAt, imageIndex);
           }
+
+          imageIndex++;
         }
       }
     }
   }
 }
 
-function convertPart(raw: RawPart): PartData {
+function convertPart(raw: Part): PartData {
   switch (raw.type) {
     case 'text':
-      return { type: 'text', text: raw.text || '' };
+      return { type: 'text', text: raw.text };
     case 'tool':
       return {
         type: 'tool',
-        tool: raw.tool || 'unknown',
+        tool: raw.tool,
         state: {
-          status: raw.state?.status || 'unknown',
-          input: raw.state?.input,
-          output: raw.state?.output,
-          title: raw.state?.title,
-          error: raw.state?.error,
+          status: raw.state.status,
+          input: raw.state.input,
+          output: 'output' in raw.state ? raw.state.output : undefined,
+          title: 'title' in raw.state ? raw.state.title : undefined,
+          error: 'error' in raw.state ? raw.state.error : undefined,
         },
       };
     case 'file':
       return {
         type: 'file',
         filename: raw.filename,
-        url: raw.url || '',
-        mime: raw.mime || 'application/octet-stream',
+        url: raw.url,
+        mime: raw.mime,
       };
     case 'reasoning':
-      return { type: 'reasoning', text: raw.text || '' };
+      return { type: 'reasoning', text: raw.text };
     default:
       return { type: raw.type };
   }

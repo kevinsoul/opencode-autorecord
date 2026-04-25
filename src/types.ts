@@ -51,8 +51,8 @@ export interface ViewConfig {
   /** Whether to enable automatic view generation */
   enabled: boolean;
 
-  /** Output formats: 'html' for overview page, 'qa' for Q&A documents */
-  formats: ('html' | 'qa')[];
+  /** Output formats: 'html' for overview page */
+  formats: ('html')[];
 
   /** Debounce delay for view regeneration (milliseconds) */
   debounceMs: number;
@@ -86,7 +86,7 @@ export const DEFAULT_CONFIG: PluginConfig = {
   debounceMs: 2000,
   view: {
     enabled: true,
-    formats: ['html', 'qa'],
+    formats: ['html'],
     debounceMs: 10000,
   },
 };

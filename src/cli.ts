@@ -13,10 +13,10 @@ function printUsage(): void {
 
 示例:
   opencode-autorecord regenerate ~/opencode-autorecord
-  npx opencode-autorecord regenerate ./conversations
+  npx opencode-autorecord regenerate ~/opencode-autorecord
 
 说明:
-  手动重新生成 HTML 概览页和问答文档。
+  手动重新生成 HTML 概览页。
   如果存在索引文件 (.autorecord-index.json)，将使用增量扫描；
   否则将执行全量扫描并创建新的索引。
 `);
@@ -59,14 +59,13 @@ async function main(): Promise<void> {
   }
 
   console.log(`开始重新生成视图: ${resolvedPath}`);
-  console.log('扫描 Markdown 文件并生成 HTML 概览页和问答文档...\n');
+  console.log('扫描 Markdown 文件并生成 HTML 概览页...\n');
 
   try {
     const outputDir = resolvedPath;
     await regenerateViews(outputDir);
     console.log('\n✓ 视图重新生成完成！');
     console.log(`  HTML 概览页: ${join(outputDir, 'opencode-overview.html')}`);
-    console.log(`  问答文档: ${join(outputDir, '*', '对话式问答文档.md')}`);
   } catch (error) {
     console.error('\n✗ 视图生成失败:', error instanceof Error ? error.message : String(error));
     process.exit(1);

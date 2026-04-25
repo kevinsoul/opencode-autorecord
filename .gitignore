@@ -4,3 +4,4 @@ dist/
 .DS_Store
 conversations
 .sisyphus
+backup.bundle

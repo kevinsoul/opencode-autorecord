@@ -1,16 +1,16 @@
-import { readdir, readFile, writeFile, appendFile, stat } from 'node:fs/promises';
+import { readdir, readFile, writeFile, appendFile, stat, mkdir, rename, rm } from 'node:fs/promises';
 import { join, basename } from 'node:path';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { version: pluginVersion } = require('../package.json');
 import {
-  loadIndex,
   saveIndex,
-  createEmptyIndex,
   updateFileIndex,
   removeFileFromIndex,
   getFilesToProcess,
   convertIndexToProjects,
+  validateAndRepairIndexes,
+  PROJECTS_DIR,
   type AutorecordIndex,
   type SessionInfo,
   type ProjectData,
@@ -170,8 +170,8 @@ function extractFullConversation(content: string): ConversationBlock[] {
       while (i < lines.length) {
         const currentLine = lines[i];
 
-        // Check for next assistant block or end of conversation
-        if (currentLine.includes('### 🤖 Assistant') || currentLine.startsWith('---')) {
+        // Check for next assistant block, user block, or end of conversation
+        if (currentLine.includes('### 🤖 Assistant') || currentLine.startsWith('---') || currentLine.includes('## 👤 User')) {
           break;
         }
 
@@ -204,14 +204,28 @@ function extractFullConversation(content: string): ConversationBlock[] {
           continue;
         }
 
-        // Check for tool block end
-        if (inToolBlock && currentLine.includes('[step-finish')) {
+        // Check for step finish: ends tool block and/or step block
+        if (currentLine.includes('[step-finish')) {
           // Save tool block
           if (toolBlock) {
             blocks.push(toolBlock);
           }
           inToolBlock = false;
           toolBlock = null;
+
+          // Also close step block if still open (step-finish part marks step end)
+          if (inStepBlock) {
+            const stepContent = stepLines.join('\n').trim();
+            if (stepContent) {
+              blocks.push({
+                type: 'message',
+                timestamp,
+                content: stepContent,
+              });
+            }
+            inStepBlock = false;
+            stepLines = [];
+          }
           i += 1;
           continue;
         }
@@ -364,10 +378,19 @@ function extractFullConversation(content: string): ConversationBlock[] {
 }
 
 function extractSessionInfo(filePath: string, content: string): SessionInfo | null {
-  const sessionMatch = content.match(/# Session:\s*(.+)/);
-  const title = sessionMatch ? sessionMatch[1].trim() : 'Unknown Session';
+  const topicMatch = content.match(/# Topic:\s*(.+)/);
+  const sessionMatch = content.match(/^Session:\s*(.+)/m);
+  const oldSessionMatch = content.match(/# Session:\s*(.+)/);
+  const title = topicMatch
+    ? topicMatch[1].trim()
+    : sessionMatch
+      ? sessionMatch[1].trim()
+      : oldSessionMatch
+        ? oldSessionMatch[1].trim()
+        : 'Unknown Session';
 
-  const dateMatch = content.match(/\*\*Created:\*\*\s*(.+)/);
+  // 锚定行首匹配，避免命中消息内容（如单行 JSON 工具输入）中的模板文本
+  const dateMatch = content.match(/^\*\*Created:\*\*\s*(.+)/m);
   const date = dateMatch ? dateMatch[1].trim() : 'Unknown Date';
 
   const blocks = extractFullConversation(content);
@@ -391,6 +414,7 @@ function extractSessionInfo(filePath: string, content: string): SessionInfo | nu
     userRequest,
     category: categorizeSession(title),
     filename: basename(filePath),
+    conversationBlocks: blocks,
   };
 }
 
@@ -402,7 +426,7 @@ async function listProjects(baseDir: string): Promise<Array<{ name: string; dir:
   const projects: Array<{ name: string; dir: string }> = [];
 
   for (const entry of entries) {
-    if (!entry.isDirectory() || entry.name.startsWith('.') || entry.name === '__pycache__') {
+    if (!entry.isDirectory() || entry.name.startsWith('.') || entry.name === '__pycache__' || entry.name === PROJECTS_DIR) {
       continue;
     }
     projects.push({ name: entry.name, dir: join(baseDir, entry.name) });
@@ -414,15 +438,15 @@ async function listProjects(baseDir: string): Promise<Array<{ name: string; dir:
 async function listMdFiles(projectDir: string): Promise<string[]> {
   const files = await readdir(projectDir, { withFileTypes: true });
   return files
-    .filter((f) => f.isFile() && f.name.endsWith('.md') && !f.name.startsWith('对话式问答文档'))
+    .filter((f) => f.isFile() && f.name.endsWith('.md'))
     .map((f) => join(projectDir, f.name));
 }
 
 async function scanProjectsIncremental(
   baseDir: string,
   index: AutorecordIndex
-): Promise<ProjectData[]> {
-  const { newFiles, modifiedFiles, deletedFiles } = await getFilesToProcess(
+): Promise<{ projects: ProjectData[]; unchangedProjects: string[] }> {
+  const { newFiles, modifiedFiles, deletedFiles, unchangedProjects } = await getFilesToProcess(
     index,
     baseDir,
     listProjects,
@@ -449,10 +473,10 @@ async function scanProjectsIncremental(
   }
 
   // Update index timestamp
-  index.lastFullScan = Date.now();
+  index.primary.lastFullScan = Date.now();
 
   // Convert index to projects format
-  return convertIndexToProjects(index);
+  return { projects: convertIndexToProjects(index), unchangedProjects };
 }
 
 // Fallback full scan (used when no index exists or for periodic rebuilds)
@@ -505,106 +529,6 @@ function parseDate(dateStr: string): Date {
   return isNaN(d.getTime()) ? new Date(0) : d;
 }
 
-// ─── QA Document Generator ───────────────────────────────────────────────────
-
-function formatConversationBlock(block: ConversationBlock, index: number): string {
-  const lines: string[] = [];
-
-  if (block.type === 'message') {
-    const content = block.content || '';
-
-    // Clean up step markers
-    const cleanContent = content
-      .replace(/\*\[step-start.*?\]\*/g, '')
-      .replace(/\*\[step-end.*?\]\*/g, '')
-      .replace(/\*\[step-finish.*?\]\*/g, '')
-      .trim();
-
-    if (!cleanContent) {
-      return '';
-    }
-
-    // Determine if this is a user request (first message) or assistant reply
-    if (index === 0) {
-      lines.push(`**[${block.timestamp}]** 💭 用户请求`);
-      lines.push(`> ${cleanContent}`);
-    } else {
-      lines.push(`**[${block.timestamp}]** 🤖 助手`);
-      lines.push(`${cleanContent}`);
-    }
-  } else if (block.type === 'tool') {
-    lines.push(`#### 🔧 Tool: ${block.toolName}`);
-
-    if (block.toolStatus) {
-      lines.push(`- **状态**: ${block.toolStatus}`);
-    }
-
-    if (block.toolInput) {
-      // Try to format as JSON if possible
-      try {
-        const inputJson = JSON.parse(block.toolInput);
-        const inputFormatted = JSON.stringify(inputJson, null, 2);
-        lines.push(`- **输入**:`);
-        lines.push(`\`\`\`json`);
-        lines.push(inputFormatted);
-        lines.push(`\`\`\``);
-      } catch {
-        lines.push(`- **输入**: \`${block.toolInput}\``);
-      }
-    }
-
-    if (block.toolOutput) {
-      lines.push(`- **输出**:`);
-      lines.push(`\`\`\``);
-      lines.push(block.toolOutput);
-      lines.push(`\`\`\``);
-    }
-  }
-
-  return lines.join('\n');
-}
-
-async function generateQADocument(projectDir: string, sessions: SessionInfo[], contentMap: Map<string, string>): Promise<number> {
-  if (sessions.length === 0) return 0;
-
-  const projectName = basename(projectDir);
-  const lines: string[] = [];
-
-  lines.push(`# ${projectName} 项目开发问答记录\n`);
-  lines.push(`> 本文档整理了 **${projectName}** 项目的完整开发对话记录，包含所有用户请求、助手回复、工具调用和思考过程。\n`);
-  lines.push('---\n');
-
-  for (let i = 0; i < sessions.length; i++) {
-    const s = sessions[i];
-    const dateStr = s.date.includes(' ') ? s.date.split(' ')[0] : s.date;
-
-    lines.push(`## ${i + 1}. ${s.title}\n`);
-    lines.push(`**时间**: ${dateStr}  `);
-    lines.push(`**来源**: \`${s.filename}\`  `);
-    lines.push(`**分类**: ${s.category}\n`);
-    lines.push(`### 对话记录\n`);
-
-    // Extract full conversation from original content
-    const originalContent = contentMap.get(s.filename);
-    if (originalContent) {
-      const blocks = extractFullConversation(originalContent);
-      for (let idx = 0; idx < blocks.length; idx++) {
-        const formatted = formatConversationBlock(blocks[idx], idx);
-        if (formatted) {
-          lines.push(formatted);
-          lines.push('');
-        }
-      }
-    }
-
-    lines.push('---\n');
-  }
-
-  const outputPath = join(projectDir, '对话式问答文档.md');
-  await writeFile(outputPath, lines.join('\n'), 'utf-8');
-  return sessions.length;
-}
-
 // ─── HTML Overview Generator ─────────────────────────────────────────────────
 
 function formatDate(dateStr: string): string {
@@ -649,129 +573,23 @@ function buildDashboard(stats: Record<string, number>, total: number): string {
   return `<div class="dashboard-section"><div class="dashboard-grid">${cards.join('')}</div></div>`;
 }
 
-function buildProjectCards(projects: ProjectData[]): string {
-  return projects.map((p) => {
-    const color = getProjectColor(p.name);
-    const icon = getProjectIcon(p.name);
-    const lastMod = formatTimestamp(p.lastModified);
-    const sessionsHtml = p.sessions.slice(0, 3).map((s) => {
-      const catColor = CATEGORY_COLORS[s.category] || CATEGORY_COLORS['开发讨论'];
-      return `
-        <div class="session-item" data-title="${escapeHtml(s.title)}" data-request="${escapeHtml(s.userRequest)}" onclick="openSessionDetailModalFromCard('${escapeHtml(p.name)}', '${escapeHtml(s.title)}', '${escapeHtml(s.date)}')" style="cursor: pointer;">
-          <div class="session-title">${escapeHtml(s.title)}</div>
-          <div class="session-meta">
-            <span class="session-date">${formatDate(s.date)}</span>
-            <span class="category-tag" style="background:${catColor.bg};color:${catColor.text}">${s.category}</span>
-          </div>
-        </div>`;
-    }).join('');
+// ─── HTML 页面生成（二级索引架构：主索引页 + 项目页）──────────────────────────
 
-    return `
-      <div class="project-card" data-project="${escapeHtml(p.name)}" style="--project-accent-color:${color}">
-        <div class="project-header" onclick="openModal('${escapeHtml(p.name)}')">
-          <div class="project-title-section">
-            <div class="project-icon" style="background:${color}">
-              <i data-lucide="${icon}" style="width:20px;height:20px;color:white"></i>
-            </div>
-            <div class="project-info">
-              <h2>${escapeHtml(p.name)}</h2>
-              <span class="last-modified">最后更新: ${lastMod}</span>
-            </div>
-          </div>
-          <div class="project-meta">
-            <span class="badge">${p.count} 个会话</span>
-          </div>
-        </div>
-        <div class="project-content">
-          <div class="sessions-list">${sessionsHtml}</div>
-        </div>
-      </div>`;
-  }).join('');
+// 项目页内联完整对话的会话数上限（超出部分仅保留元数据，完整内容见 md 文件）
+const DETAIL_SESSION_LIMIT = 30;
+
+// 跳转链接辅助
+function projectPageHref(name: string): string {
+  return `${PROJECTS_DIR}/${encodeURIComponent(name)}.html`;
 }
 
-function buildGlobalTimeline(projects: ProjectData[]): string {
-  const allSessions: Array<SessionInfo & { projectName: string; projectColor: string }> = [];
-  for (const p of projects) {
-    const color = getProjectColor(p.name);
-    for (const s of p.sessions) {
-      allSessions.push({ ...s, projectName: p.name, projectColor: color });
-    }
-  }
-
-  allSessions.sort((a, b) => parseDate(b.date).getTime() - parseDate(a.date).getTime());
-
-  return allSessions.map((s, idx) => {
-    const serial = allSessions.length - idx;
-    const isFirst = idx === 0;
-    const catColor = CATEGORY_COLORS[s.category] || CATEGORY_COLORS['开发讨论'];
-    const icon = getProjectIcon(s.projectName);
-
-    return `
-      <div class="timeline-item ${isFirst ? 'recent' : ''}" data-project="${escapeHtml(s.projectName.toLowerCase())}" data-title="${escapeHtml(s.title)}" data-request="${escapeHtml(s.userRequest)}" onclick="openSessionDetailModalFromCard('${escapeHtml(s.projectName)}', '${escapeHtml(s.title)}', '${escapeHtml(s.date)}')" style="cursor: pointer;">
-        <div class="timeline-serial">${serial}</div>
-        <div class="timeline-content">
-          <span class="timeline-category" style="background:${catColor.bg};color:${catColor.text}">${s.category}</span>
-          <div class="timeline-meta-row">
-            <div class="timeline-project">
-              <div class="timeline-project-icon" style="background:${s.projectColor}">
-                <i data-lucide="${icon}" style="width:14px;height:14px;color:white"></i>
-              </div>
-              <span style="color:${s.projectColor}">${escapeHtml(s.projectName)}</span>
-            </div>
-            <div class="timeline-date">${s.date}</div>
-          </div>
-          <div class="timeline-title">${escapeHtml(s.title)}</div>
-        </div>
-      </div>`;
-  }).join('');
+function sessionAnchor(filename: string): string {
+  return `#session-${encodeURIComponent(filename)}`;
 }
 
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;')
-    .replace(/\n/g, ' ')
-    .replace(/\r/g, ' ');
-}
+// ─── 公共 CSS（主索引页与项目页共用）─────────────────────────────────────────
 
-function buildHtml(projects: ProjectData[], totalSessions: number): string {
-  const generatedTime = new Date().toLocaleString('zh-CN');
-  const projectCount = projects.length;
-  const categoryStats = computeCategoryStats(projects);
-  const dashboard = buildDashboard(categoryStats, totalSessions);
-  const projectCards = buildProjectCards(projects);
-  const globalTimeline = buildGlobalTimeline(projects);
-
-  // Build full project data for modal (not limited to 3 sessions)
-  const fullProjectsData: Record<string, unknown> = {};
-  for (const p of projects) {
-    fullProjectsData[p.name] = {
-      name: p.name,
-      title: p.name,
-      lastModified: formatTimestamp(p.lastModified),
-      color: getProjectColor(p.name),
-      sessions: p.sessions.map((s) => ({
-        title: s.title,
-        request: s.userRequest,
-        date: s.date,
-        category: s.category,
-        categoryStyle: `background:${(CATEGORY_COLORS[s.category] || CATEGORY_COLORS['开发讨论']).bg};color:${(CATEGORY_COLORS[s.category] || CATEGORY_COLORS['开发讨论']).text}`,
-        conversationBlocks: s.conversationBlocks || [],
-      })),
-    };
-  }
-
-  return `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>OpenCode Overview</title>
-  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
-  <style>
+const COMMON_CSS = `
     :root {
       --apple-blue: #007AFF;
       --apple-gray-1: #F5F5F7;
@@ -783,8 +601,10 @@ function buildHtml(projects: ProjectData[], totalSessions: number): string {
       --apple-white: #FFFFFF;
       --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif;
       --font-text: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+      --nav-height: 68px;
     }
     * { margin: 0; padding: 0; box-sizing: border-box; }
+    a { color: inherit; text-decoration: none; }
     body {
       font-family: var(--font-text);
       background: var(--apple-gray-1);
@@ -794,6 +614,7 @@ function buildHtml(projects: ProjectData[], totalSessions: number): string {
     }
     .nav-bar {
       position: sticky; top: 0; z-index: 100;
+      height: var(--nav-height);
       background: rgba(251,251,253,0.72);
       backdrop-filter: saturate(180%) blur(20px);
       border-bottom: 1px solid rgba(0,0,0,0.06);
@@ -808,14 +629,14 @@ function buildHtml(projects: ProjectData[], totalSessions: number): string {
       font-family: var(--font-display); font-size: 21px; font-weight: 600;
       letter-spacing: -0.021em; flex-shrink: 0;
     }
-    .nav-gen-time {
-      font-size: 13px; font-weight: 600; color: #5856D6;
-      margin-left: 16px; flex-shrink: 0;
-    }
     .nav-version {
       font-size: 12px; font-weight: 500; color: var(--apple-gray-4);
       background: var(--apple-gray-2); padding: 2px 8px; border-radius: 9999px;
       vertical-align: middle; margin-left: 8px;
+    }
+    .nav-gen-time {
+      font-size: 13px; font-weight: 600; color: #5856D6;
+      margin-left: 16px; flex-shrink: 0;
     }
     .nav-search-container { position: relative; max-width: 400px; width: 100%; }
     .nav-search-box {
@@ -828,17 +649,22 @@ function buildHtml(projects: ProjectData[], totalSessions: number): string {
     .nav-stats { display: flex; gap: 24px; flex-shrink: 0; }
     .nav-stat-value { font-family: var(--font-display); font-size: 24px; font-weight: 600; color: var(--apple-blue); }
     .nav-stat-label { font-size: 11px; color: var(--apple-gray-4); text-transform: uppercase; letter-spacing: 0.05em; }
+    .back-link {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 14px; font-weight: 500; color: var(--apple-gray-5);
+      background: var(--apple-white); border: 1px solid var(--apple-gray-2);
+      border-radius: 9999px; padding: 8px 16px;
+      transition: all 0.25s ease; flex-shrink: 0;
+    }
+    .back-link:hover { color: var(--apple-blue); border-color: var(--apple-blue); }
     @media (max-width: 768px) {
       .nav-content { flex-wrap: wrap; gap: 16px; }
       .nav-left { width: 100%; gap: 16px; }
       .nav-search-container { max-width: none; order: 3; }
       .nav-stats { margin-left: auto; }
     }
-    .dashboard-section {
-      background: linear-gradient(180deg, rgba(255,255,255,0.9) 0%, rgba(245,245,247,0.6) 100%);
-      border-bottom: 1px solid rgba(0,0,0,0.04); padding: 24px 48px 32px;
-    }
-    .dashboard-grid { max-width: 1400px; margin: 0 auto; display: flex; flex-wrap: nowrap; gap: 12px; overflow-x: auto; }
+    .dashboard-section { padding: 0 0 24px; }
+    .dashboard-grid { display: flex; flex-wrap: nowrap; gap: 12px; overflow-x: auto; }
     .dashboard-card {
       background: rgba(255,255,255,0.85); backdrop-filter: saturate(180%) blur(20px);
       border-radius: 16px; padding: 16px 8px; border: 1px solid rgba(255,255,255,0.6);
@@ -853,14 +679,36 @@ function buildHtml(projects: ProjectData[], totalSessions: number): string {
     .dashboard-bar-fill { height: 100%; border-radius: 9999px; transition: width 0.8s cubic-bezier(0.4,0,0.2,1); }
     .dashboard-percentage { font-size: 11px; font-weight: 600; color: var(--apple-gray-4); }
     @media (max-width: 768px) {
-      .dashboard-section { padding: 16px 12px 20px; }
+      .dashboard-section { padding: 0 0 16px; }
       .dashboard-grid { gap: 8px; }
       .dashboard-card { padding: 12px 6px; border-radius: 12px; min-width: 64px; }
       .dashboard-count { font-size: 22px; }
       .dashboard-label { font-size: 10px; }
       .dashboard-bar { max-width: 50px; }
     }
-    .container { max-width: 1400px; margin: 0 auto; padding: 48px 48px 64px; }
+    .container { max-width: 1400px; margin: 0 auto; padding: 24px 48px 64px; display: flex; gap: 24px; align-items: flex-start; }
+    .sidebar {
+      width: 260px; flex-shrink: 0; position: fixed;
+      top: var(--nav-height); left: max(48px, calc(50% - 700px + 48px));
+      background: var(--apple-white); border: 1px solid var(--apple-gray-2);
+      border-radius: 16px; padding: 16px 12px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+      max-height: calc(100vh - var(--nav-height) - 32px); overflow-y: auto;
+    }
+    .sidebar-title { font-size: 12px; font-weight: 600; color: var(--apple-gray-4); text-transform: uppercase; letter-spacing: 0.05em; padding: 4px 8px 12px; }
+    .sidebar-list { display: flex; flex-direction: column; gap: 2px; }
+    .sidebar-item {
+      display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+      border-radius: 10px; transition: background 0.2s ease; font-size: 14px;
+    }
+    .sidebar-item:hover { background: var(--apple-gray-1); }
+    .sidebar-item.hidden { display: none; }
+    .sidebar-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; align-self: flex-start; margin-top: 5px; }
+    .sidebar-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+    .sidebar-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--apple-black); font-weight: 500; }
+    .sidebar-time { font-size: 11px; color: var(--apple-gray-4); }
+    .sidebar-count { font-size: 12px; color: var(--apple-gray-4); background: var(--apple-gray-1); padding: 2px 8px; border-radius: 9999px; flex-shrink: 0; }
+    .main-content { flex: 1; min-width: 0; margin-left: 284px; }
     .view-switcher { display: flex; gap: 12px; margin-bottom: 32px; justify-content: center; }
     .view-btn {
       display: flex; align-items: center; gap: 8px; padding: 10px 20px;
@@ -912,7 +760,7 @@ function buildHtml(projects: ProjectData[], totalSessions: number): string {
     .session-item {
       background: var(--apple-white); border-radius: 12px; padding: 16px 20px;
       box-shadow: 0 1px 2px rgba(0,0,0,0.04); transition: all 0.3s cubic-bezier(0.4,0,0.2,1);
-      border: 1px solid var(--apple-gray-2); cursor: pointer;
+      border: 1px solid var(--apple-gray-2); cursor: pointer; display: block;
     }
     .session-item:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.08); transform: translateX(4px); }
     .session-item.hidden { display: none; }
@@ -922,43 +770,7 @@ function buildHtml(projects: ProjectData[], totalSessions: number): string {
     .session-date::before { content: ''; width: 4px; height: 4px; background: var(--apple-gray-3); border-radius: 50%; }
     .category-tag { padding: 3px 8px; border-radius: 9999px; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: -0.01em; }
     .session-request { font-size: 13px; color: var(--apple-gray-5); line-height: 1.4; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--apple-gray-2); }
-    .session-detail-modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.4); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); z-index: 2000; display: none; justify-content: center; align-items: center; opacity: 0; transition: opacity 0.3s ease; }
-    .session-detail-modal-overlay.active { display: flex; opacity: 1; }
-    .session-detail-modal-container { background: linear-gradient(135deg, rgba(255,255,255,0.95), rgba(255,255,255,0.9)); backdrop-filter: saturate(200%) blur(30px); -webkit-backdrop-filter: saturate(200%) blur(30px); border-radius: 28px; border: 1px solid rgba(255,255,255,0.6); box-shadow: 0 25px 80px rgba(0,0,0,0.15), 0 10px 30px rgba(0,0,0,0.1), inset 0 1px 0 rgba(255,255,255,0.9); width: 90%; max-width: 900px; max-height: 85vh; overflow: hidden; transform: scale(0.9) translateY(20px); transition: transform 0.4s cubic-bezier(0.4,0,0.2,1); display: flex; flex-direction: column; }
-    .session-detail-modal-overlay.active .session-detail-modal-container { transform: scale(1) translateY(0); }
-    .session-detail-modal-header { padding: 32px 40px 24px; background: var(--apple-white); border-bottom: 1px solid var(--apple-gray-2); display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; }
-    .session-detail-modal-title-section { display: flex; align-items: center; gap: 16px; flex: 1; }
-    .session-detail-modal-icon { width: 48px; height: 48px; border-radius: 14px; display: flex; align-items: center; justify-content: center; color: white; flex-shrink: 0; background: var(--apple-blue); }
-    .session-detail-modal-title-content h2 { font-family: var(--font-display); font-size: 22px; font-weight: 600; letter-spacing: -0.021em; margin-bottom: 6px; }
-    .session-detail-modal-title-content .session-date { font-size: 14px; color: var(--apple-gray-4); }
-    .session-detail-modal-close { width: 36px; height: 36px; border-radius: 50%; background: var(--apple-gray-1); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; color: var(--apple-gray-5); transition: all 0.2s ease; flex-shrink: 0; }
-    .session-detail-modal-close:hover { background: var(--apple-gray-2); color: var(--apple-black); }
-    .session-detail-modal-content { padding: 32px 40px 40px; overflow-y: auto; flex: 1; background: var(--apple-gray-1); }
-    .conversation-block { background: var(--apple-white); border-radius: 16px; padding: 24px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); border: 1px solid var(--apple-gray-2); }
-    .conversation-block:last-child { margin-bottom: 0; }
-    .conversation-block-header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--apple-gray-2); }
-    .conversation-block-role { font-family: var(--font-display); font-size: 15px; font-weight: 600; }
-    .conversation-block-role.user { color: var(--apple-blue); }
-    .conversation-block-role.assistant { color: var(--apple-black); }
-    .conversation-block-role.tool { color: #FF9500; }
-    .conversation-block-time { font-size: 13px; color: var(--apple-gray-4); margin-left: auto; }
-    .conversation-block-content { font-size: 14px; line-height: 1.6; color: var(--apple-black); white-space: pre-wrap; }
-    .conversation-block-content code { background: var(--apple-gray-1); padding: 2px 6px; border-radius: 4px; font-family: 'SF Mono', monospace; font-size: 13px; }
-    .conversation-block-content pre { background: var(--apple-gray-1); padding: 16px; border-radius: 12px; overflow-x: auto; margin: 12px 0; }
-    .conversation-block-content pre code { background: none; padding: 0; }
-    .tool-block { background: linear-gradient(135deg, rgba(255,149,0,0.05), rgba(255,149,0,0.02)); border: 1px solid rgba(255,149,0,0.15); }
-    .tool-block .conversation-block-role.tool { color: #FF9500; }
-    .tool-detail { margin-top: 12px; }
-    .tool-detail-label { font-size: 12px; font-weight: 600; color: var(--apple-gray-5); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
-    .tool-detail-content { background: var(--apple-gray-1); border-radius: 8px; padding: 12px; font-family: 'SF Mono', monospace; font-size: 13px; line-height: 1.5; overflow-x: auto; white-space: pre-wrap; }
-    @media (max-width: 768px) {
-      .session-detail-modal-container { width: 95%; max-height: 90vh; border-radius: 24px; }
-      .session-detail-modal-header { padding: 24px 24px 20px; }
-      .session-detail-modal-icon { width: 40px; height: 40px; }
-      .session-detail-modal-title-content h2 { font-size: 18px; }
-      .session-detail-modal-content { padding: 24px 24px 32px; }
-      .conversation-block { padding: 16px; }
-    }
+    .session-more { text-align: center; font-size: 13px; font-weight: 500; color: var(--apple-blue); padding: 12px 16px; }
     .global-timeline-wrapper { max-width: 800px; margin: 0 auto; }
     .global-timeline-wrapper.hidden { display: none; }
     .global-timeline-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 32px; padding: 0 8px; }
@@ -980,6 +792,18 @@ function buildHtml(projects: ProjectData[], totalSessions: number): string {
     .global-timeline .timeline-title { font-family: var(--font-display); font-size: 17px; font-weight: 600; line-height: 1.4; letter-spacing: -0.016em; margin-bottom: 12px; color: var(--apple-black); }
     .global-timeline .timeline-request { font-size: 14px; color: var(--apple-gray-5); line-height: 1.5; padding-top: 12px; border-top: 1px solid var(--apple-gray-2); }
     .global-timeline .timeline-category { display: inline-block; padding: 3px 10px; border-radius: 9999px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: -0.01em; position: absolute; top: 24px; right: 24px; }
+    .project-hero {
+      display: flex; align-items: center; gap: 20px;
+      background: linear-gradient(135deg, rgba(255,255,255,0.9), rgba(255,255,255,0.7));
+      backdrop-filter: saturate(200%) blur(30px); -webkit-backdrop-filter: saturate(200%) blur(30px);
+      border-radius: 24px; border: 1px solid rgba(255,255,255,0.6);
+      box-shadow: 0 4px 24px rgba(0,0,0,0.05), inset 0 1px 0 rgba(255,255,255,0.8);
+      padding: 28px 32px; margin-bottom: 40px;
+    }
+    .project-hero-icon { width: 64px; height: 64px; border-radius: 18px; display: flex; align-items: center; justify-content: center; color: white; flex-shrink: 0; background: var(--project-accent-color, var(--apple-blue)); }
+    .project-hero h1 { font-family: var(--font-display); font-size: 28px; font-weight: 700; letter-spacing: -0.021em; margin-bottom: 8px; }
+    .project-hero-meta { display: flex; gap: 16px; flex-wrap: wrap; }
+    .project-hero-meta span { font-size: 13px; color: var(--apple-gray-5); background: var(--apple-gray-1); padding: 4px 12px; border-radius: 9999px; }
     @media (max-width: 768px) {
       .container { padding: 32px 16px; }
       .projects-list { grid-template-columns: 1fr; gap: 16px; }
@@ -997,42 +821,196 @@ function buildHtml(projects: ProjectData[], totalSessions: number): string {
       .global-timeline .timeline-title { font-size: 15px; }
       .global-timeline .timeline-meta-row { gap: 8px; }
       .global-timeline .timeline-project { padding: 4px 10px; font-size: 12px; }
+      .project-hero { padding: 20px 20px; }
+      .project-hero-icon { width: 48px; height: 48px; border-radius: 14px; }
+      .project-hero h1 { font-size: 22px; }
+      .container { flex-direction: column; gap: 16px; }
+      .sidebar { width: 100%; position: static; max-height: 220px; }
+      .main-content { margin-left: 0; }
     }
-    .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.4); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); z-index: 1000; display: none; justify-content: center; align-items: center; opacity: 0; transition: opacity 0.3s ease; }
-    .modal-overlay.active { display: flex; opacity: 1; }
-    .modal-container {
-      background: linear-gradient(135deg, rgba(255,255,255,0.95), rgba(255,255,255,0.9));
-      backdrop-filter: saturate(200%) blur(30px); -webkit-backdrop-filter: saturate(200%) blur(30px);
-      border-radius: 28px; border: 1px solid rgba(255,255,255,0.6);
-      box-shadow: 0 25px 80px rgba(0,0,0,0.15), 0 10px 30px rgba(0,0,0,0.1), inset 0 1px 0 rgba(255,255,255,0.9);
-      width: 90%; max-width: 800px; max-height: 85vh; overflow: hidden;
-      transform: scale(0.9) translateY(20px); transition: transform 0.4s cubic-bezier(0.4,0,0.2,1);
-      display: flex; flex-direction: column;
-    }
-    .modal-overlay.active .modal-container { transform: scale(1) translateY(0); }
-    .modal-header { padding: 32px 40px 24px; background: var(--apple-white); border-bottom: 1px solid var(--apple-gray-2); display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; }
-    .modal-title-section { display: flex; align-items: center; gap: 16px; flex: 1; }
-    .modal-icon { width: 48px; height: 48px; border-radius: 14px; display: flex; align-items: center; justify-content: center; color: white; flex-shrink: 0; background: var(--project-accent-color, var(--apple-blue)); }
-    .modal-title-content h2 { font-family: var(--font-display); font-size: 24px; font-weight: 600; letter-spacing: -0.021em; margin-bottom: 6px; }
-    .modal-title-content .last-modified { font-size: 14px; color: var(--apple-gray-4); }
-    .modal-close { width: 36px; height: 36px; border-radius: 50%; background: var(--apple-gray-1); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; color: var(--apple-gray-5); transition: all 0.2s ease; flex-shrink: 0; }
-    .modal-close:hover { background: var(--apple-gray-2); color: var(--apple-black); }
-    .modal-content { padding: 32px 40px 40px; overflow-y: auto; flex: 1; background: var(--apple-gray-1); }
-    .modal-stats { display: flex; gap: 24px; margin-bottom: 32px; padding: 20px 24px; background: var(--apple-white); border-radius: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); }
-    .modal-stat { display: flex; flex-direction: column; gap: 4px; }
-    .modal-stat-value { font-family: var(--font-display); font-size: 28px; font-weight: 600; color: var(--apple-blue); }
-    .modal-stat-label { font-size: 13px; color: var(--apple-gray-4); }
     footer { text-align: center; padding: 64px 32px; margin-top: 48px; }
     .footer-text { font-size: 12px; color: var(--apple-gray-4); }
+`;
+
+// ─── 项目页专属 CSS（会话详情弹窗 + 代码块）───────────────────────────────────
+
+const DETAIL_CSS = `
+    .session-detail-modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.4); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); z-index: 2000; display: none; justify-content: center; align-items: center; opacity: 0; transition: opacity 0.3s ease; }
+    .session-detail-modal-overlay.active { display: flex; opacity: 1; }
+    .session-detail-modal-container { background: linear-gradient(135deg, rgba(255,255,255,0.95), rgba(255,255,255,0.9)); backdrop-filter: saturate(200%) blur(30px); -webkit-backdrop-filter: saturate(200%) blur(30px); border-radius: 0; border: 1px solid rgba(255,255,255,0.6); box-shadow: 0 25px 80px rgba(0,0,0,0.15), 0 10px 30px rgba(0,0,0,0.1), inset 0 1px 0 rgba(255,255,255,0.9); width: 100%; max-width: 100%; height: 100%; max-height: 100%; overflow: hidden; transform: scale(0.9) translateY(20px); transition: transform 0.4s cubic-bezier(0.4,0,0.2,1); display: flex; flex-direction: column; }
+    .session-detail-modal-overlay.active .session-detail-modal-container { transform: scale(1) translateY(0); }
+    .session-detail-modal-header { padding: 32px 40px 24px; background: var(--apple-white); border-bottom: 1px solid var(--apple-gray-2); display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; }
+    .session-detail-modal-title-section { display: flex; align-items: center; gap: 16px; flex: 1; }
+    .session-detail-modal-icon { width: 48px; height: 48px; border-radius: 14px; display: flex; align-items: center; justify-content: center; color: white; flex-shrink: 0; background: var(--apple-blue); }
+    .session-detail-modal-title-content h2 { font-family: var(--font-display); font-size: 22px; font-weight: 600; letter-spacing: -0.021em; margin-bottom: 6px; }
+    .session-detail-modal-title-content .session-date { font-size: 14px; color: var(--apple-gray-4); }
+    .session-detail-modal-close { width: 36px; height: 36px; border-radius: 50%; background: var(--apple-gray-1); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; color: var(--apple-gray-5); transition: all 0.2s ease; flex-shrink: 0; }
+    .session-detail-modal-close:hover { background: var(--apple-gray-2); color: var(--apple-black); }
+    .session-detail-modal-content { padding: 32px 40px 40px; overflow-y: auto; flex: 1; background: var(--apple-gray-1); }
+    .conversation-block { background: var(--apple-white); border-radius: 16px; padding: 24px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); border: 1px solid var(--apple-gray-2); }
+    .conversation-block:last-child { margin-bottom: 0; }
+    .conversation-block-header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--apple-gray-2); }
+    .conversation-block-role { font-family: var(--font-display); font-size: 15px; font-weight: 600; }
+    .conversation-block-role.user { color: var(--apple-blue); }
+    .conversation-block-role.assistant { color: var(--apple-black); }
+    .conversation-block-role.tool { color: #FF9500; }
+    .conversation-block-time { font-size: 13px; color: var(--apple-gray-4); margin-left: auto; }
+    .conversation-block-content { font-size: 14px; line-height: 1.6; color: var(--apple-black); white-space: pre-wrap; }
+    .conversation-block-content details { margin: 12px 0; background: var(--apple-gray-1); border: 1px solid var(--apple-gray-2); border-radius: 8px; padding: 10px 16px; }
+    .conversation-block-content summary { cursor: pointer; font-weight: 600; font-size: 13px; color: var(--apple-gray-5); user-select: none; margin-bottom: 4px; }
+    .conversation-block-content summary:hover { color: var(--apple-blue); }
+    .conversation-block-content details[open] summary { margin-bottom: 8px; }
+    .conversation-block-content code:not(pre code) { background: var(--apple-gray-1); padding: 2px 6px; border-radius: 4px; font-family: 'SF Mono', SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13px; color: var(--apple-black); }
+    .conversation-block-content pre { position: relative; background: #1d1f21; border-radius: 12px; overflow-x: auto; margin: 12px 0; border: 1px solid #3a3d42; padding: 0; }
+    .conversation-block-content pre code { display: block; padding: 40px 16px 16px; background: none; font-family: 'SF Mono', SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13px; line-height: 1.6; }
+    .code-block-header { position: absolute; top: 0; left: 0; right: 0; height: 36px; background: #2d2f33; border-bottom: 1px solid #3a3d42; border-radius: 12px 12px 0 0; display: flex; align-items: center; justify-content: space-between; padding: 0 12px; z-index: 2; }
+    .code-block-lang { font-size: 11px; font-weight: 600; color: #9aa0a6; text-transform: uppercase; letter-spacing: 0.05em; }
+    .code-block-copy { font-size: 12px; font-weight: 500; color: #9aa0a6; background: transparent; border: 1px solid #5f6368; border-radius: 6px; padding: 3px 10px; cursor: pointer; transition: all 0.2s ease; font-family: var(--font-text); }
+    .code-block-copy:hover { color: var(--apple-white); background: #5f6368; border-color: #5f6368; }
+    .code-block-copy.copied { color: #34C759; border-color: #34C759; }
+    .tool-block { background: linear-gradient(135deg, rgba(255,149,0,0.05), rgba(255,149,0,0.02)); border: 1px solid rgba(255,149,0,0.15); }
+    .tool-block .conversation-block-role.tool { color: #FF9500; }
+    .tool-detail { margin-top: 12px; }
+    .tool-detail-label { font-size: 12px; font-weight: 600; color: var(--apple-gray-5); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
+    .tool-detail-content { position: relative; background: #1d1f21; border-radius: 8px; padding: 40px 12px 12px; font-family: 'SF Mono', SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13px; line-height: 1.5; overflow-x: auto; white-space: pre-wrap; color: #abb2bf; border: 1px solid #3a3d42; }
+    .tool-detail-content .code-block-header { border-radius: 8px 8px 0 0; }
+    .tool-detail-content pre { border-radius: 8px; }
+    .session-detail-note { text-align: center; padding: 40px 20px; color: var(--apple-gray-4); font-size: 14px; line-height: 1.8; }
     @media (max-width: 768px) {
-      .modal-container { width: 95%; max-height: 90vh; border-radius: 24px; }
-      .modal-header { padding: 24px 24px 20px; }
-      .modal-icon { width: 40px; height: 40px; }
-      .modal-title-content h2 { font-size: 20px; }
-      .modal-content { padding: 24px 24px 32px; }
-      .modal-stats { padding: 16px 20px; gap: 20px; }
-      .modal-stat-value { font-size: 22px; }
+      .session-detail-modal-container { width: 100%; max-height: 100%; border-radius: 0; }
+      .session-detail-modal-header { padding: 24px 24px 20px; }
+      .session-detail-modal-icon { width: 40px; height: 40px; }
+      .session-detail-modal-title-content h2 { font-size: 18px; }
+      .session-detail-modal-content { padding: 24px 24px 32px; }
+      .conversation-block { padding: 16px; }
     }
+`;
+
+// ─── 主索引页生成 ─────────────────────────────────────────────────────────────
+
+function buildProjectCards(projects: ProjectData[]): string {
+  return projects.map((p) => {
+    const color = getProjectColor(p.name);
+    const icon = getProjectIcon(p.name);
+    const lastMod = formatTimestamp(p.lastModified);
+    const href = projectPageHref(p.name);
+    const sessionsHtml = p.sessions.slice(0, 3).map((s) => {
+      const catColor = CATEGORY_COLORS[s.category] || CATEGORY_COLORS['开发讨论'];
+      return `
+        <a class="session-item" href="${href}${sessionAnchor(s.filename)}" data-title="${escapeHtml(s.title)}" data-request="${escapeHtml(s.userRequest)}">
+          <div class="session-title">${escapeHtml(s.title)}</div>
+          <div class="session-meta">
+            <span class="session-date">${formatDate(s.date)}</span>
+            <span class="category-tag" style="background:${catColor.bg};color:${catColor.text}">${s.category}</span>
+          </div>
+        </a>`;
+    }).join('');
+
+    return `
+      <div class="project-card" data-project="${escapeHtml(p.name)}" data-action="open-project" style="--project-accent-color:${color}; cursor: pointer;">
+        <div class="project-header">
+          <div class="project-title-section">
+            <div class="project-icon" style="background:${color}">
+              <i data-lucide="${icon}" style="width:20px;height:20px;color:white"></i>
+            </div>
+            <div class="project-info">
+              <h2>${escapeHtml(p.name)}</h2>
+              <span class="last-modified">最后更新: ${lastMod}</span>
+            </div>
+          </div>
+          <div class="project-meta">
+            <span class="badge">${p.count} 个会话</span>
+          </div>
+        </div>
+        <div class="project-content">
+          <div class="sessions-list">${sessionsHtml}
+            <a class="session-item session-more" href="${href}">查看全部 ${p.count} 个会话 →</a>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function buildProjectSidebar(projects: ProjectData[]): string {
+  return projects.map((p) => {
+    const color = getProjectColor(p.name);
+    const href = projectPageHref(p.name);
+    return `
+      <a class="sidebar-item" href="${href}" data-project="${escapeHtml(p.name)}">
+        <span class="sidebar-dot" style="background:${color}"></span>
+        <span class="sidebar-main">
+          <span class="sidebar-name">${escapeHtml(p.name)}</span>
+          <span class="sidebar-time">${formatTimestamp(p.lastModified)}</span>
+        </span>
+        <span class="sidebar-count">${p.count}</span>
+      </a>`;
+  }).join('');
+}
+
+function buildGlobalTimeline(projects: ProjectData[]): string {
+  const allSessions: Array<SessionInfo & { projectName: string; projectColor: string }> = [];
+  for (const p of projects) {
+    const color = getProjectColor(p.name);
+    for (const s of p.sessions) {
+      allSessions.push({ ...s, projectName: p.name, projectColor: color });
+    }
+  }
+
+  allSessions.sort((a, b) => parseDate(b.date).getTime() - parseDate(a.date).getTime());
+
+  return allSessions.map((s, idx) => {
+    const serial = allSessions.length - idx;
+    const isFirst = idx === 0;
+    const catColor = CATEGORY_COLORS[s.category] || CATEGORY_COLORS['开发讨论'];
+    const icon = getProjectIcon(s.projectName);
+    const href = projectPageHref(s.projectName) + sessionAnchor(s.filename);
+
+    return `
+      <a class="timeline-item ${isFirst ? 'recent' : ''}" href="${href}" data-project="${escapeHtml(s.projectName)}" data-title="${escapeHtml(s.title)}" data-request="${escapeHtml(s.userRequest)}">
+        <div class="timeline-serial">${serial}</div>
+        <div class="timeline-content">
+          <span class="timeline-category" style="background:${catColor.bg};color:${catColor.text}">${s.category}</span>
+          <div class="timeline-meta-row">
+            <div class="timeline-project">
+              <div class="timeline-project-icon" style="background:${s.projectColor}">
+                <i data-lucide="${icon}" style="width:14px;height:14px;color:white"></i>
+              </div>
+              <span style="color:${s.projectColor}">${escapeHtml(s.projectName)}</span>
+            </div>
+            <div class="timeline-date">${s.date}</div>
+          </div>
+          <div class="timeline-title">${escapeHtml(s.title)}</div>
+          <div class="timeline-request">${escapeHtml(s.userRequest)}</div>
+        </div>
+      </a>`;
+  }).join('');
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// 主索引页：仅含元数据（项目卡片 + 全局时间线 + 搜索），不内联对话内容
+function buildOverviewHtml(projects: ProjectData[], totalSessions: number): string {
+  const generatedTime = new Date().toLocaleString('zh-CN');
+  const projectCount = projects.length;
+  const categoryStats = computeCategoryStats(projects);
+  const dashboard = buildDashboard(categoryStats, totalSessions);
+
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenCode Overview</title>
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <style>
+    ${COMMON_CSS}
   </style>
 </head>
 <body>
@@ -1053,74 +1031,33 @@ function buildHtml(projects: ProjectData[], totalSessions: number): string {
     </div>
   </nav>
 
-  ${dashboard}
-
   <div class="container">
-    <div class="view-switcher">
-      <button class="view-btn active" id="btnGrid" onclick="switchView('grid')">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
-        项目视图
-      </button>
-      <button class="view-btn" id="btnTimeline" onclick="switchView('timeline')">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-        时间线视图
-      </button>
-    </div>
+    <aside class="sidebar">
+      <div class="sidebar-title">项目列表（${projectCount}）</div>
+      <div class="sidebar-list" id="projectSidebarList">${buildProjectSidebar(projects)}</div>
+    </aside>
 
-    <div class="projects-list" id="projectsList">${projectCards}</div>
-
-    <div class="global-timeline-wrapper hidden" id="globalTimelineWrapper">
-      <div class="global-timeline-header">
-        <h3>全部会话时间线</h3>
-        <span class="global-timeline-count">共 ${totalSessions} 个会话</span>
-      </div>
-      <div class="global-timeline" id="globalTimeline">${globalTimeline}</div>
-    </div>
-  </div>
-
-  <div class="modal-overlay" id="modalOverlay" onclick="closeModal(event)">
-    <div class="modal-container" onclick="event.stopPropagation()">
-      <div class="modal-header">
-        <div class="modal-title-section">
-          <div class="modal-icon" id="modalIcon" style="background: var(--apple-blue)">
-            <i data-lucide="folder" style="width:24px;height:24px;color:white"></i>
-          </div>
-          <div class="modal-title-content">
-            <h2 id="modalTitle">项目名称</h2>
-            <span class="last-modified" id="modalLastModified">最后更新: --</span>
-          </div>
-        </div>
-        <button class="modal-close" onclick="closeModal()">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    <div class="main-content">
+      ${dashboard}
+      <div class="view-switcher">
+        <button class="view-btn active" id="btnGrid" data-action="switch-view" data-view="grid">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+          项目视图
+        </button>
+        <button class="view-btn" id="btnTimeline" data-action="switch-view" data-view="timeline">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          时间线视图
         </button>
       </div>
-      <div class="modal-content">
-        <div class="modal-stats">
-          <div class="modal-stat"><span class="modal-stat-value" id="modalSessionCount">0</span><span class="modal-stat-label">会话</span></div>
-          <div class="modal-stat"><span class="modal-stat-value" id="modalTimeRange">--</span><span class="modal-stat-label">时间跨度</span></div>
-        </div>
-        <div id="modalTimeline"></div>
-      </div>
-    </div>
-  </div>
 
-  <div class="session-detail-modal-overlay" id="sessionDetailModalOverlay" onclick="closeSessionDetailModal(event)">
-    <div class="session-detail-modal-container" onclick="event.stopPropagation()">
-      <div class="session-detail-modal-header">
-        <div class="session-detail-modal-title-section">
-          <div class="session-detail-modal-icon" id="sessionDetailModalIcon" style="background: var(--apple-blue)">
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-          </div>
-          <div class="session-detail-modal-title-content">
-            <h2 id="sessionDetailModalTitle">会话标题</h2>
-            <span class="session-date" id="sessionDetailModalDate">--</span>
-          </div>
+      <div class="projects-list" id="projectsList">${buildProjectCards(projects)}</div>
+
+      <div class="global-timeline-wrapper hidden" id="globalTimelineWrapper">
+        <div class="global-timeline-header">
+          <h3>全部会话时间线</h3>
+          <span class="global-timeline-count">共 ${totalSessions} 个会话</span>
         </div>
-        <button class="session-detail-modal-close" onclick="closeSessionDetailModal()">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-        </button>
-      </div>
-      <div class="session-detail-modal-content" id="sessionDetailModalContent">
+        <div class="global-timeline" id="globalTimeline">${buildGlobalTimeline(projects)}</div>
       </div>
     </div>
   </div>
@@ -1128,8 +1065,6 @@ function buildHtml(projects: ProjectData[], totalSessions: number): string {
   <footer><p class="footer-text">Generated by opencode-autorecord plugin</p></footer>
 
   <script>
-    const projectsData = ${JSON.stringify(fullProjectsData).replace(/<\//g, '<\\/').replace(/<!--/g, '<\\!--')};
-
     function getProjectColor(name) {
       let hash = 0;
       for (let i = 0; i < name.length; i++) {
@@ -1148,59 +1083,239 @@ function buildHtml(projects: ProjectData[], totalSessions: number): string {
       });
     }
 
-    function openModal(projectName) {
-      const project = projectsData[projectName];
-      if (!project) return;
-      document.getElementById('modalTitle').textContent = project.title;
-      document.getElementById('modalLastModified').textContent = project.lastModified;
-      document.getElementById('modalIcon').style.background = project.color;
-      document.getElementById('modalSessionCount').textContent = project.sessions.length;
+    function filterProjects() {
+      const filter = document.getElementById('searchInput').value.toLowerCase();
+      const isTimeline = document.getElementById('btnTimeline').classList.contains('active');
 
-      if (project.sessions.length > 0) {
-        const dates = project.sessions.map(s => new Date(s.date)).filter(d => !isNaN(d));
-        if (dates.length > 0) {
-          const oldest = new Date(Math.min(...dates));
-          const newest = new Date(Math.max(...dates));
-          const diffDays = Math.ceil((newest - oldest) / (1000 * 60 * 60 * 24));
-          document.getElementById('modalTimeRange').textContent = diffDays <= 1 ? '1天' : diffDays < 30 ? diffDays + '天' : Math.ceil(diffDays / 30) + '个月';
-        } else {
-          document.getElementById('modalTimeRange').textContent = '--';
-        }
-      } else {
-        document.getElementById('modalTimeRange').textContent = '--';
-      }
-
-      const sorted = [...project.sessions].sort((a, b) => new Date(b.date) - new Date(a.date));
-      let html = '<div style="position:relative;padding-left:28px;">';
-      html += '<div style="position:absolute;left:8px;top:0;bottom:0;width:2px;background:linear-gradient(to bottom, var(--apple-blue), var(--apple-gray-3));border-radius:1px;"></div>';
-      sorted.forEach((s, i) => {
-        html += '<div style="position:relative;padding-bottom:28px;padding-left:24px;cursor:pointer;" onclick="openSessionDetailModalFromProject(' + JSON.stringify(escapeHtml(projectName)) + ', ' + i + ')">';
-        html += '<div style="position:absolute;left:-24px;top:4px;width:12px;height:12px;border-radius:50%;background:white;border:2px solid var(--apple-blue);box-shadow:0 0 0 3px var(--apple-gray-1);z-index:1;"></div>';
-        html += '<div style="background:white;border-radius:16px;padding:24px;box-shadow:0 1px 3px rgba(0,0,0,0.04);border:1px solid var(--apple-gray-2);transition:all 0.3s cubic-bezier(0.4,0,0.2,1);">';
-        html += '<div style="font-size:13px;color:var(--apple-gray-4);margin-bottom:8px;display:flex;align-items:center;gap:8px;">' + escapeHtml(s.date) + '<span style="' + s.categoryStyle + '">' + escapeHtml(s.category) + '</span></div>';
-        html += '<div style="font-family:var(--font-display);font-size:17px;font-weight:600;line-height:1.4;letter-spacing:-0.016em;margin-bottom:12px;">' + escapeHtml(s.title) + '</div>';
-        html += '<div style="font-size:14px;color:var(--apple-gray-5);line-height:1.5;padding-top:12px;border-top:1px solid var(--apple-gray-2);">' + escapeHtml(s.request) + '</div>';
-        html += '</div></div>';
+      document.querySelectorAll('#projectSidebarList .sidebar-item').forEach(item => {
+        const name = (item.getAttribute('data-project') || '').toLowerCase();
+        item.classList.toggle('hidden', !name.includes(filter));
       });
-      html += '</div>';
-      document.getElementById('modalTimeline').innerHTML = html;
-      document.getElementById('modalOverlay').classList.add('active');
-      document.body.style.overflow = 'hidden';
+
+      if (!isTimeline) {
+        document.querySelectorAll('.project-card').forEach(card => {
+          const projectName = (card.getAttribute('data-project') || '').toLowerCase();
+          const sessions = card.querySelectorAll('.session-item');
+          let hasVisible = projectName.includes(filter);
+          if (!hasVisible) {
+            sessions.forEach(s => {
+              const title = s.getAttribute('data-title') || '';
+              const request = s.getAttribute('data-request') || '';
+              const match = title.includes(filter) || request.includes(filter);
+              s.classList.toggle('hidden', !match);
+              if (match) hasVisible = true;
+            });
+          } else {
+            sessions.forEach(s => s.classList.remove('hidden'));
+          }
+          card.classList.toggle('hidden', !hasVisible);
+        });
+      } else {
+        let visibleCount = 0;
+        document.querySelectorAll('#globalTimeline .timeline-item').forEach(item => {
+          const project = (item.getAttribute('data-project') || '').toLowerCase();
+          const title = (item.getAttribute('data-title') || '').toLowerCase();
+          const request = (item.getAttribute('data-request') || '').toLowerCase();
+          const match = project.includes(filter) || title.includes(filter) || request.includes(filter);
+          item.classList.toggle('hidden', !match);
+          if (match) visibleCount++;
+        });
+        document.querySelector('.global-timeline-count').textContent = '共 ' + visibleCount + ' 个会话';
+      }
     }
 
-    function openSessionDetailModalFromProject(projectName, sessionIndex) {
-      const project = projectsData[projectName];
-      if (!project || !project.sessions || sessionIndex < 0 || sessionIndex >= project.sessions.length) return;
-      openSessionDetailModal(project.sessions[sessionIndex]);
+    function switchView(view) {
+      document.getElementById('btnGrid').classList.toggle('active', view === 'grid');
+      document.getElementById('btnTimeline').classList.toggle('active', view === 'timeline');
+      document.getElementById('projectsList').classList.toggle('hidden', view !== 'grid');
+      document.getElementById('globalTimelineWrapper').classList.toggle('hidden', view !== 'timeline');
+      filterProjects();
     }
 
-    function openSessionDetailModalFromCard(projectName, sessionTitle, sessionDate) {
-      const project = projectsData[projectName];
-      if (!project || !project.sessions) return;
-      const session = project.sessions.find(s => s.title === sessionTitle && s.date === sessionDate);
-      if (!session) return;
-      openSessionDetailModal(session);
-    }
+    document.addEventListener('click', (e) => {
+      if (e.target.closest('a[href]')) return;
+      const actionEl = e.target.closest('[data-action]');
+      if (!actionEl) return;
+      const action = actionEl.dataset.action;
+      switch (action) {
+        case 'open-project':
+          location.href = 'projects/' + encodeURIComponent(actionEl.dataset.project || '') + '.html';
+          break;
+        case 'switch-view':
+          switchView(actionEl.dataset.view || 'grid');
+          break;
+      }
+    });
+    document.addEventListener('DOMContentLoaded', function() {
+      initProjectsData();
+      if (typeof lucide !== 'undefined') {
+        lucide.createIcons();
+      } else {
+        document.querySelectorAll('[data-lucide]').forEach(el => {
+          const projectName = el.closest('[data-project]')?.getAttribute('data-project') ||
+                             el.closest('.timeline-project')?.querySelector('span')?.textContent ||
+                             '?';
+          const initial = (projectName[0] || '?').toUpperCase();
+          const color = el.closest('[style*="--project-accent-color"]')?.style.getPropertyValue('--project-accent-color') ||
+                       el.parentElement?.style.background || '#007AFF';
+          el.outerHTML = '<svg width="20" height="20" viewBox="0 0 40 40" style="border-radius:50%"><circle cx="20" cy="20" r="20" fill="' + color + '"/><text x="20" y="27" text-anchor="middle" fill="white" font-size="18" font-weight="600">' + initial + '</text></svg>';
+        });
+      }
+    });
+  </script>
+</body>
+</html>`;
+}
+
+// ─── 项目页生成 ───────────────────────────────────────────────────────────────
+
+function buildProjectHtml(project: ProjectData): string {
+  const color = getProjectColor(project.name);
+  const icon = getProjectIcon(project.name);
+  const lastMod = formatTimestamp(project.lastModified);
+
+  const sessions = project.sessions;
+  const timeRangeText: string = ((): string => {
+    if (sessions.length === 0) return '无';
+    const dates = sessions.map((s) => parseDate(s.date).getTime());
+    const oldest = Math.min(...dates);
+    const newest = Math.max(...dates);
+    const diffDays = Math.ceil((newest - oldest) / (1000 * 60 * 60 * 24));
+    if (diffDays <= 0) return '1 天内';
+    if (diffDays < 30) return diffDays + ' 天';
+    return Math.ceil(diffDays / 30) + ' 个月';
+  })();
+
+  // 截断策略：仅最近 N 个会话内联完整对话，更老会话只保留元数据
+  const detailFilenames = new Set(sessions.slice(0, DETAIL_SESSION_LIMIT).map((s) => s.filename));
+  const projectData = {
+    name: project.name,
+    title: project.name,
+    lastModified: lastMod,
+    color,
+    sessions: sessions.map((s) => ({
+      title: s.title,
+      request: s.userRequest,
+      date: s.date,
+      category: s.category,
+      filename: s.filename,
+      conversationBlocks: detailFilenames.has(s.filename) ? (s.conversationBlocks || []) : undefined,
+    })),
+  };
+
+  const timelineItems = sessions.map((s, idx) => {
+    const serial = sessions.length - idx;
+    const isFirst = idx === 0;
+    const catColor = CATEGORY_COLORS[s.category] || CATEGORY_COLORS['开发讨论'];
+
+    return `
+      <div class="timeline-item ${isFirst ? 'recent' : ''}" data-action="open-session" data-filename="${escapeHtml(s.filename)}" data-title="${escapeHtml(s.title)}" data-request="${escapeHtml(s.userRequest)}" style="cursor: pointer;">
+        <div class="timeline-serial">${serial}</div>
+        <div class="timeline-content">
+          <span class="timeline-category" style="background:${catColor.bg};color:${catColor.text}">${s.category}</span>
+          <div class="timeline-meta-row">
+            <div class="timeline-date">${s.date}</div>
+          </div>
+          <div class="timeline-title">${escapeHtml(s.title)}</div>
+          <div class="timeline-request">${escapeHtml(s.userRequest)}</div>
+        </div>
+      </div>`;
+  }).join('');
+
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${escapeHtml(project.name)} - OpenCode Overview</title>
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-javascript.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-typescript.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-markdown.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-css.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-markup.min.js"></script>
+  <style>
+    ${COMMON_CSS}
+    ${DETAIL_CSS}
+  </style>
+</head>
+<body>
+  <nav class="nav-bar">
+    <div class="nav-content">
+      <div class="nav-left">
+        <a class="back-link" href="../opencode-overview.html">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>
+          返回总览
+        </a>
+        <div class="nav-title">${escapeHtml(project.name)}</div>
+        <div class="nav-gen-time">${lastMod}</div>
+        <div class="nav-search-container">
+          <span class="nav-search-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg></span>
+          <input type="text" class="nav-search-box" id="searchInput" placeholder="搜索会话..." onkeyup="filterProjects()">
+        </div>
+      </div>
+      <div class="nav-stats">
+        <div class="nav-stat"><div class="nav-stat-value">${sessions.length}</div><div class="nav-stat-label">会话</div></div>
+        <div class="nav-stat"><div class="nav-stat-value">${timeRangeText}</div><div class="nav-stat-label">时间跨度</div></div>
+      </div>
+    </div>
+  </nav>
+
+  <div class="container">
+    <div class="project-hero" style="--project-accent-color:${color}">
+      <div class="project-hero-icon" style="background:${color}">
+        <i data-lucide="${icon}" style="width:28px;height:28px;color:white"></i>
+      </div>
+      <div>
+        <h1>${escapeHtml(project.name)}</h1>
+        <div class="project-hero-meta">
+          <span>${sessions.length} 个会话</span>
+          <span>时间跨度: ${timeRangeText}</span>
+          <span>最后更新: ${lastMod}</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="global-timeline-wrapper">
+      <div class="global-timeline-header">
+        <h3>会话时间线</h3>
+        <span class="global-timeline-count">共 ${sessions.length} 个会话</span>
+      </div>
+      <div class="global-timeline" id="globalTimeline">${timelineItems}</div>
+    </div>
+  </div>
+
+  <footer><p class="footer-text">Generated by opencode-autorecord plugin</p></footer>
+
+  <div class="session-detail-modal-overlay" id="sessionDetailModalOverlay">
+    <div class="session-detail-modal-container">
+      <div class="session-detail-modal-header">
+        <div class="session-detail-modal-title-section">
+          <div class="session-detail-modal-icon" id="sessionDetailModalIcon" style="background:${color}">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          </div>
+          <div class="session-detail-modal-title-content">
+            <h2 id="sessionDetailModalTitle">会话标题</h2>
+            <span class="session-date" id="sessionDetailModalDate">--</span>
+          </div>
+        </div>
+        <button class="session-detail-modal-close" data-action="close-session-detail">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="session-detail-modal-content" id="sessionDetailModalContent">
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const projectData = ${JSON.stringify(projectData).replace(/<\//g, '<\\/').replace(/<!--/g, '<\\u0021--')};
 
     function escapeHtml(text) {
       const div = document.createElement('div');
@@ -1208,13 +1323,13 @@ function buildHtml(projects: ProjectData[], totalSessions: number): string {
       return div.innerHTML;
     }
 
-    function closeModal(event) {
-      if (event && event.target !== event.currentTarget) return;
-      document.getElementById('modalOverlay').classList.remove('active');
-      document.body.style.overflow = '';
+    function findSessionByFilename(filename) {
+      return projectData.sessions.find(s => s.filename === filename);
     }
 
-    function openSessionDetailModal(session) {
+    function openSessionDetailModal(filename) {
+      const session = findSessionByFilename(filename);
+      if (!session) return;
       document.getElementById('sessionDetailModalTitle').textContent = session.title;
       document.getElementById('sessionDetailModalDate').textContent = session.date;
 
@@ -1265,133 +1380,291 @@ function buildHtml(projects: ProjectData[], totalSessions: number): string {
           }
         });
       } else {
-        html = '<div style="text-align: center; padding: 40px; color: var(--apple-gray-4);">暂无对话记录</div>';
+        html = '<div class="session-detail-note">该会话时间较早，HTML 中未内联完整对话内容。<br>完整内容请查看对应 Markdown 文件：<br><code>' + escapeHtml(session.filename) + '</code></div>';
       }
 
       contentEl.innerHTML = html;
-
-      const overlay = document.getElementById('sessionDetailModalOverlay');
-      overlay.classList.add('active');
+      document.getElementById('sessionDetailModalOverlay').classList.add('active');
       document.body.style.overflow = 'hidden';
+      if (typeof Prism !== 'undefined') {
+        Prism.highlightAll();
+      }
     }
 
-    function closeSessionDetailModal(event) {
-      if (event && event.target !== event.currentTarget) return;
+    function closeSessionDetailModal() {
       document.getElementById('sessionDetailModalOverlay').classList.remove('active');
-      if (!document.getElementById('modalOverlay').classList.contains('active')) {
-        document.body.style.overflow = '';
+      document.body.style.overflow = '';
+    }
+
+    function copyCodeBlock(btn) {
+      const copyId = btn.getAttribute('data-copy-id');
+      const codeEl = document.getElementById(copyId);
+      if (!codeEl) return;
+      let rawCode = codeEl.getAttribute('data-raw-code');
+      if (rawCode) {
+        try { rawCode = decodeURIComponent(rawCode); } catch { rawCode = codeEl.textContent || ''; }
+      } else {
+        rawCode = codeEl.textContent || '';
       }
+      navigator.clipboard.writeText(rawCode).then(() => {
+        btn.textContent = '已复制';
+        btn.classList.add('copied');
+        setTimeout(() => { btn.textContent = '复制'; btn.classList.remove('copied'); }, 2000);
+      }).catch(() => {
+        const ta = document.createElement('textarea');
+        ta.value = rawCode;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+          document.execCommand('copy');
+          btn.textContent = '已复制';
+          btn.classList.add('copied');
+          setTimeout(() => { btn.textContent = '复制'; btn.classList.remove('copied'); }, 2000);
+        } catch {}
+        document.body.removeChild(ta);
+      });
     }
 
     function formatConversationContent(content) {
       if (!content) return '';
-      let result = escapeHtml(content);
-      result = result.split(String.fromCharCode(10)).join('<br>');
-      // Use string split/join to avoid regex issues with backticks
       const backtick = String.fromCharCode(96);
       const tripleBacktick = backtick + backtick + backtick;
-      const parts = result.split(tripleBacktick);
-      for (let i = 1; i < parts.length; i += 2) {
-        if (i < parts.length) {
-          parts[i] = '<pre><code>' + parts[i] + '</code></pre>';
+
+      const parts = content.split(tripleBacktick);
+      const processedParts = [];
+
+      for (let i = 0; i < parts.length; i++) {
+        if (i % 2 === 0) {
+          // 保护 details 折叠块与 <br> 标签，避免被转义显示为原始文本
+          let text = parts[i]
+            .replace(/<details>/g, '\\u0001')
+            .replace(/<\\/details>/g, '\\u0002')
+            .replace(/<summary>/g, '\\u0003')
+            .replace(/<\\/summary>/g, '\\u0004')
+            .replace(/<br>/gi, '\\u0005');
+          text = escapeHtml(text);
+          const inlineParts = text.split(backtick);
+          for (let j = 1; j < inlineParts.length - 1; j += 2) {
+            if (j + 1 < inlineParts.length) {
+              inlineParts[j] = '<code>' + inlineParts[j] + '</code>';
+            }
+          }
+          text = inlineParts.join('');
+          text = text.split('\\n').join('<br>');
+          text = text
+            .split('\\u0001').join('<details>')
+            .split('\\u0002').join('</details>')
+            .split('\\u0003').join('<summary>')
+            .split('\\u0004').join('</summary>')
+            .split('\\u0005').join('<br>');
+          processedParts.push(text);
+        } else {
+          let code = parts[i];
+          let lang = '';
+          const newlineIdx = code.indexOf('\\n');
+          if (newlineIdx === 0) {
+            const nextNewline = code.indexOf('\\n', 1);
+            const firstLine = nextNewline > 0 ? code.substring(1, nextNewline).trim() : code.substring(1).trim();
+            if (firstLine && /^[a-zA-Z0-9\\-+_]+$/.test(firstLine) && firstLine.length <= 20) {
+              lang = firstLine.toLowerCase();
+              code = nextNewline > 0 ? code.substring(nextNewline + 1) : '';
+            }
+          } else if (newlineIdx > 0) {
+            const firstLine = code.substring(0, newlineIdx).trim();
+            if (firstLine && /^[a-zA-Z0-9\\-+_]+$/.test(firstLine) && firstLine.length <= 20) {
+              lang = firstLine.toLowerCase();
+              code = code.substring(newlineIdx + 1);
+            }
+          }
+
+          const langMap = {
+            'js': 'javascript', 'jsx': 'javascript',
+            'ts': 'typescript', 'tsx': 'typescript',
+            'sh': 'bash', 'shell': 'bash', 'zsh': 'bash',
+            'py': 'python', 'python3': 'python',
+            'yml': 'yaml',
+            'md': 'markdown',
+            'jsonc': 'json',
+          };
+          const prismLang = langMap[lang] || lang;
+          const langClass = prismLang ? 'language-' + prismLang : '';
+          const langLabel = lang || 'text';
+
+          const escapedCode = escapeHtml(code);
+          const escapedLangLabel = escapeHtml(langLabel);
+          const escapedLangClass = escapeHtml(langClass);
+          const copyId = 'copy-' + Math.random().toString(36).substr(2, 9);
+          const headerHtml = '<div class="code-block-header"><span class="code-block-lang">' + escapedLangLabel + '</span><button class="code-block-copy" data-copy-id="' + copyId + '" onclick="copyCodeBlock(this)">复制</button></div>';
+          processedParts.push('<pre>' + headerHtml + '<code' + (escapedLangClass ? ' class="' + escapedLangClass + '"' : '') + ' id="' + copyId + '" data-raw-code="' + encodeURIComponent(code) + '"' + '>' + escapedCode + '</code></pre>');
         }
       }
-      result = parts.join('');
-      // Handle inline code with split/join to avoid regex issues
-      const inlineParts = result.split(backtick);
-      for (let i = 1; i < inlineParts.length - 1; i += 2) {
-        if (i + 1 < inlineParts.length) {
-          inlineParts[i] = '<code>' + inlineParts[i] + '</code>';
-        }
-      }
-      result = inlineParts.join('');
-      return result;
+
+      return processedParts.join('');
     }
 
     function formatToolContent(content) {
       if (!content) return '';
+      let code;
       try {
         const json = JSON.parse(content);
-        return escapeHtml(JSON.stringify(json, null, 2));
+        code = JSON.stringify(json, null, 2);
       } catch {
-        return escapeHtml(content);
+        code = content;
       }
+      const escaped = escapeHtml(code);
+      const copyId = 'copy-tool-' + Math.random().toString(36).substr(2, 9);
+      const headerHtml = '<div class="code-block-header"><span class="code-block-lang">json</span><button class="code-block-copy" data-copy-id="' + copyId + '" onclick="copyCodeBlock(this)">复制</button></div>';
+      return '<pre>' + headerHtml + '<code class="language-json" id="' + copyId + '" data-raw-code="' + encodeURIComponent(code) + '">' + escaped + '</code></pre>';
     }
 
     function filterProjects() {
       const filter = document.getElementById('searchInput').value.toLowerCase();
-      const isTimeline = document.getElementById('btnTimeline').classList.contains('active');
-
-      if (!isTimeline) {
-        document.querySelectorAll('.project-card').forEach(card => {
-          const projectName = card.getAttribute('data-project') || '';
-          const sessions = card.querySelectorAll('.session-item');
-          let hasVisible = projectName.includes(filter);
-          if (!hasVisible) {
-            sessions.forEach(s => {
-              const title = s.getAttribute('data-title') || '';
-              const request = s.getAttribute('data-request') || '';
-              const match = title.includes(filter) || request.includes(filter);
-              s.classList.toggle('hidden', !match);
-              if (match) hasVisible = true;
-            });
-          } else {
-            sessions.forEach(s => s.classList.remove('hidden'));
-          }
-          card.classList.toggle('hidden', !hasVisible);
-        });
-      } else {
-        let visibleCount = 0;
-        document.querySelectorAll('#globalTimeline .timeline-item').forEach(item => {
-          const project = item.getAttribute('data-project') || '';
-          const title = item.getAttribute('data-title') || '';
-          const request = item.getAttribute('data-request') || '';
-          const match = project.includes(filter) || title.includes(filter) || request.includes(filter);
-          item.classList.toggle('hidden', !match);
-          if (match) visibleCount++;
-        });
-        document.querySelector('.global-timeline-count').textContent = '共 ' + visibleCount + ' 个会话';
-      }
+      let visibleCount = 0;
+      document.querySelectorAll('#globalTimeline .timeline-item').forEach(item => {
+        const title = (item.getAttribute('data-title') || '').toLowerCase();
+        const request = (item.getAttribute('data-request') || '').toLowerCase();
+        const match = title.includes(filter) || request.includes(filter);
+        item.classList.toggle('hidden', !match);
+        if (match) visibleCount++;
+      });
+      document.querySelector('.global-timeline-count').textContent = '共 ' + visibleCount + ' 个会话';
     }
 
-    function switchView(view) {
-      document.getElementById('btnGrid').classList.toggle('active', view === 'grid');
-      document.getElementById('btnTimeline').classList.toggle('active', view === 'timeline');
-      document.getElementById('projectsList').classList.toggle('hidden', view !== 'grid');
-      document.getElementById('globalTimelineWrapper').classList.toggle('hidden', view !== 'timeline');
-      filterProjects();
+    function openSessionFromHash() {
+      let hash;
+      try {
+        hash = decodeURIComponent(window.location.hash.slice(1));
+      } catch {
+        return;
+      }
+      if (hash.startsWith('session-')) {
+        const filename = hash.slice('session-'.length);
+        const session = findSessionByFilename(filename);
+        if (session) {
+          openSessionDetailModal(filename);
+        }
+      }
     }
 
     document.addEventListener('keydown', e => {
       if (e.key === 'Escape') {
-        if (document.getElementById('sessionDetailModalOverlay').classList.contains('active')) {
+        closeSessionDetailModal();
+      }
+    });
+    document.addEventListener('click', (e) => {
+      const actionEl = e.target.closest('[data-action]');
+      if (!actionEl) return;
+      const action = actionEl.dataset.action;
+      switch (action) {
+        case 'open-session':
+          openSessionDetailModal(actionEl.dataset.filename);
+          break;
+        case 'close-session-detail':
           closeSessionDetailModal();
-        } else if (document.getElementById('modalOverlay').classList.contains('active')) {
-          closeModal();
-        }
+          break;
       }
     });
     document.addEventListener('DOMContentLoaded', function() {
-      initProjectsData();
       if (typeof lucide !== 'undefined') {
         lucide.createIcons();
-      } else {
-        // CDN fallback: replace with colored circle + initial
-        document.querySelectorAll('[data-lucide]').forEach(el => {
-          const projectName = el.closest('[data-project]')?.getAttribute('data-project') ||
-                             el.closest('.timeline-project')?.querySelector('span')?.textContent ||
-                             '?';
-          const initial = (projectName[0] || '?').toUpperCase();
-          const color = el.closest('[style*="--project-accent-color"]')?.style.getPropertyValue('--project-accent-color') ||
-                       el.parentElement?.style.background || '#007AFF';
-          el.outerHTML = '<svg width="20" height="20" viewBox="0 0 40 40" style="border-radius:50%"><circle cx="20" cy="20" r="20" fill="' + color + '"/><text x="20" y="27" text-anchor="middle" fill="white" font-size="18" font-weight="600">' + initial + '</text></svg>';
-        });
       }
+      openSessionFromHash();
     });
   </script>
 </body>
 </html>`;
 }
+
+// ─── 写入与增量辅助 ──────────────────────────────────────────────────────────
+
+async function writeHtmlAtomically(filePath: string, content: string): Promise<void> {
+  const tmpPath = `${filePath}.tmp`;
+  await writeFile(tmpPath, content, 'utf-8');
+  await rename(tmpPath, filePath);
+}
+
+// 检查哪些项目的索引缓存缺少完整对话（需要全量重读）
+function projectsMissingDetail(index: AutorecordIndex, projects: ProjectData[]): Set<string> {
+  const missing = new Set<string>();
+  for (const p of projects) {
+    const secIndex = index.secondary.get(p.name);
+    const hasDetail =
+      secIndex &&
+      Object.values(secIndex.files).every((f) => Array.isArray(f.sessionInfo.conversationBlocks));
+    if (!hasDetail) {
+      missing.add(p.name);
+    }
+  }
+  return missing;
+}
+
+// 删除已不存在项目对应的残留 HTML 页面
+async function cleanupStaleProjectPages(
+  projectsDir: string,
+  projects: ProjectData[]
+): Promise<number> {
+  let removedCount = 0;
+  try {
+    const existing = new Set(projects.map((p) => p.name));
+    const entries = await readdir(projectsDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.html')) continue;
+      let projectName: string;
+      try {
+        projectName = decodeURIComponent(entry.name.slice(0, -5));
+      } catch {
+        projectName = '';
+      }
+      if (existing.has(projectName)) continue;
+      await rm(join(projectsDir, entry.name), { force: true });
+      removedCount += 1;
+    }
+  } catch {
+    // 清理失败静默忽略，不影响视图再生主流程
+  }
+  return removedCount;
+}
+
+// 确保项目数据包含完整对话：索引缓存缺失时全量重读该项目 md 并回写索引
+async function ensureProjectDetail(
+  project: ProjectData,
+  baseDir: string,
+  index: AutorecordIndex
+): Promise<ProjectData> {
+  const secIndex = index.secondary.get(project.name);
+  const hasDetail =
+    secIndex &&
+    Object.values(secIndex.files).every((f) => Array.isArray(f.sessionInfo.conversationBlocks));
+  if (hasDetail) {
+    return project;
+  }
+
+  const projectDir = join(baseDir, project.name);
+  const mdFiles = await listMdFiles(projectDir);
+  const sessions: SessionInfo[] = [];
+  let lastModified = project.lastModified;
+
+  for (const filePath of mdFiles) {
+    try {
+      const content = await readFile(filePath, 'utf-8');
+      const info = extractSessionInfo(filePath, content);
+      if (info) {
+        sessions.push(info);
+        const s = await stat(filePath);
+        if (s.mtimeMs > lastModified) lastModified = s.mtimeMs;
+        updateFileIndex(index, project.name, filePath, { mtime: s.mtime, size: s.size }, info);
+      }
+    } catch {
+      // Skip unreadable files
+    }
+  }
+
+  sessions.sort((a, b) => parseDate(b.date).getTime() - parseDate(a.date).getTime());
+  return { name: project.name, sessions, count: sessions.length, lastModified };
+}
+
 
 // ─── Main Entry Point ────────────────────────────────────────────────────────
 
@@ -1400,21 +1673,20 @@ export async function regenerateViews(globalSaveDir: string): Promise<void> {
   const logPath = join(baseDir, '.autorecord-views.log');
 
   try {
-    // Try to load existing index
-    let index = await loadIndex(baseDir);
+    // Validate and repair indexes (also handles v1 migration)
+    const index = await validateAndRepairIndexes(baseDir);
     let projects: ProjectData[];
     let isIncremental = false;
+    let unchangedProjects: string[] = [];
 
-    // Map to store original content for QA doc generation
-    const contentMap = new Map<string, string>();
-
-    if (index) {
+    if (index.primary.lastFullScan > 0 && Object.keys(index.primary.projects).length > 0) {
       // Use incremental scanning with index
-      projects = await scanProjectsIncremental(baseDir, index);
+      const result = await scanProjectsIncremental(baseDir, index);
+      projects = result.projects;
+      unchangedProjects = result.unchangedProjects;
       isIncremental = true;
     } else {
       // Fallback to full scan and create new index
-      index = createEmptyIndex();
       projects = await scanProjectsFull(baseDir);
 
       // Build index from full scan results
@@ -1435,49 +1707,57 @@ export async function regenerateViews(globalSaveDir: string): Promise<void> {
           }
         }
       }
+
+      index.primary.lastFullScan = Date.now();
+      unchangedProjects = [];
     }
+
+    const projectsDir = join(baseDir, PROJECTS_DIR);
+    await mkdir(projectsDir, { recursive: true });
 
     if (projects.length === 0) {
       await writeViewLog(logPath, 'INFO: No projects with markdown files found');
-      return;
-    }
+    } else {
+      const totalSessions = projects.reduce((sum, p) => sum + p.count, 0);
 
-    const totalSessions = projects.reduce((sum, p) => sum + p.count, 0);
+      // 1. 主索引页：仅元数据（剥离对话内容，避免文件无限膨胀）
+      const metaProjects = projects.map((p) => ({
+        ...p,
+        sessions: p.sessions.map((s) => ({ ...s, conversationBlocks: undefined })),
+      }));
+      const overviewPath = join(baseDir, 'opencode-overview.html');
+      await writeHtmlAtomically(overviewPath, buildOverviewHtml(metaProjects, totalSessions));
 
-    // Generate HTML overview
-    const htmlContent = buildHtml(projects, totalSessions);
-    const htmlPath = join(baseDir, 'opencode-overview.html');
-    await writeFile(htmlPath, htmlContent, 'utf-8');
+      // 2. 项目页：增量重建（仅变更项目或缓存缺对话的项目）
+      const missingDetail = projectsMissingDetail(index, projects);
+      let rebuiltCount = 0;
 
-    // Generate QA documents for each project
-    let qaTotal = 0;
-    for (const project of projects) {
-      const projectDir = join(baseDir, project.name);
+      for (const p of projects) {
+        const needsRebuild = missingDetail.has(p.name) || !unchangedProjects.includes(p.name);
+        if (!needsRebuild) continue;
 
-      // Read all original markdown files for this project
-      const mdFiles = await listMdFiles(projectDir);
-      contentMap.clear();
-      for (const filePath of mdFiles) {
-        try {
-          const content = await readFile(filePath, 'utf-8');
-          contentMap.set(basename(filePath), content);
-        } catch {
-          // Skip unreadable files
-        }
+        const fullProject = await ensureProjectDetail(p, baseDir, index);
+        const pagePath = join(projectsDir, `${encodeURIComponent(p.name)}.html`);
+        await writeHtmlAtomically(pagePath, buildProjectHtml(fullProject));
+        rebuiltCount += 1;
       }
 
-      const count = await generateQADocument(projectDir, project.sessions, contentMap);
-      qaTotal += count;
+      const scanMode = isIncremental ? 'incremental' : 'full';
+      await writeViewLog(
+        logPath,
+        `INFO: Views regenerated (${scanMode}) - ${projects.length} projects, ${totalSessions} sessions, overview: ${overviewPath}, rebuilt project pages: ${rebuiltCount}`
+      );
     }
 
-    // Save updated index
-    await saveIndex(baseDir, index);
+    // 清理已删除项目的残留 HTML 页面（独立于项目是否存在，保证全删时也能清理）
+    const removedStale = await cleanupStaleProjectPages(projectsDir, projects);
+    if (removedStale > 0) {
+      await writeViewLog(logPath, `INFO: Removed ${removedStale} stale project page(s)`);
+    }
 
-    const scanMode = isIncremental ? 'incremental' : 'full';
-    await writeViewLog(
-      logPath,
-      `INFO: Views regenerated (${scanMode}) - ${projects.length} projects, ${totalSessions} sessions, ${qaTotal} QA docs, HTML: ${htmlPath}`
-    );
+    // Always save index, even if projects.length === 0
+    // This ensures orphan cleanup in validateAndRepairIndexes is persisted
+    await saveIndex(baseDir, index);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await writeViewLog(logPath, `ERROR: Failed to regenerate views - ${message}`);
