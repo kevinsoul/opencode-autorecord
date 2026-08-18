@@ -6,7 +6,7 @@
 
 > Reference: https://github.com/learningpro/opencode-autosave-conversation
 
-> Website: see the landing page in [`site/`](site/index.html) — inspired by the OpenCode design language / 官网：落地页见 [`site/`](site/index.html)——设计语言致敬 OpenCode
+> Website: http://www.claode.cn / 官网：http://www.claode.cn
 
 
 ## Key Improvements / 优化与改动
