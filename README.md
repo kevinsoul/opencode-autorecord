@@ -94,6 +94,21 @@ user-home/ / 用户目录/
 - Stale project pages are auto-removed on every view regeneration: pages in `projects/` whose project folders no longer exist are deleted (`cleanupStaleProjectPages`) / 残留页面清理：每次视图再生成时删除 `projects/` 中已不存在项目对应的 `.html` 页面
 
 
+## Preview / 效果预览
+
+Main index page — project cards with session timeline / 主索引页——项目卡片与会话时间线：
+
+![overview](screenshots/1-overview-full.png)
+
+Project page — full conversation with dark code blocks / 项目页——完整对话与深色代码块：
+
+![project](screenshots/3-project-full.png)
+
+Session detail modal — click any session to browse the full record / 会话详情弹窗——点击任意会话查看完整记录：
+
+![modal](screenshots/4-session-modal.png)
+
+
 ## CLI / CLI 命令行工具
 
 Besides running as an OpenCode plugin, a CLI command is provided to manually regenerate the HTML views. / 除了作为 OpenCode 插件自动运行外，还提供了 CLI 命令用于手动重新生成视图。
