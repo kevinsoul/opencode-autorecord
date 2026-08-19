@@ -139,6 +139,46 @@ npx opencode-autorecord regenerate ~/opencode-autorecord
 opencode-autorecord regenerate ~/opencode-autorecord
 ```
 
+> **Windows users**: `~` is not expanded on Windows — use a full path like `C:\Users\<username>\opencode-autorecord` instead. See [Platform Notes](#platform-notes--平台说明). / **Windows 用户**：Windows 下 `~` 不会展开，请使用完整路径如 `C:\Users\<用户名>\opencode-autorecord`，详见[平台说明](#platform-notes--平台说明)。
+
+
+## Platform Notes / 平台说明
+
+### Linux / macOS (Default / 默认)
+
+- Save directory: `~/opencode-autorecord` (i.e. `/home/<username>/opencode-autorecord`) / 保存目录：`~/opencode-autorecord`（即 `/home/<用户名>/opencode-autorecord`）
+- User-level config: `~/.config/opencode/opencode.json` / 用户级配置文件：`~/.config/opencode/opencode.json`
+- Plugin cache: `~/.cache/opencode/node_modules/` / 插件缓存目录：`~/.cache/opencode/node_modules/`
+- The `~` in CLI paths is expanded by the shell, use it directly / CLI 路径中的 `~` 由 shell 自动展开，直接使用即可
+
+### Windows / Windows 平台
+
+The plugin is cross-platform: all paths are resolved via `os.homedir()` and Windows-illegal filename characters are automatically replaced with `-`. Differences to note: / 插件本身跨平台兼容：路径基于 `os.homedir()` 自动解析，文件名中的 Windows 非法字符会自动替换为 `-`。需要注意的差异：
+
+- Save directory: `C:\Users\<username>\opencode-autorecord` (auto-resolved, no configuration needed) / 保存目录：`C:\Users\<用户名>\opencode-autorecord`（自动解析，无需配置）
+- User-level config: `%USERPROFILE%\.config\opencode\opencode.json` / 用户级配置文件：`%USERPROFILE%\.config\opencode\opencode.json`
+- **CLI caveat**: `~` is NOT expanded on Windows (Node does not handle shell `~`), so you must pass the full path / **CLI 注意**：Windows 下 `~` 不会被展开（Node 不处理 shell 的 `~`），必须传入完整路径：
+
+  ```powershell
+  # PowerShell (recommended / 推荐)
+  opencode-autorecord regenerate C:\Users\<username>\opencode-autorecord
+
+  # CMD
+  opencode-autorecord regenerate %USERPROFILE%\opencode-autorecord
+  ```
+
+- **Filename restrictions**: Windows-illegal characters (`\ / : * ? " < > |`) are automatically replaced with `-`, but Windows reserved device names (`CON`, `NUL`, `COM1`, etc.) cannot be used as filenames — saving will fail if a project directory happens to be named that / **文件名限制**：Windows 非法字符（`\ / : * ? " < > |`）会被自动替换为 `-`；但 Windows 保留设备名（`CON`、`NUL`、`COM1` 等）不能作为文件名，若项目目录恰好叫这些名字会导致保存失败
+- **Recommendation**: OpenCode officially recommends running in [WSL](https://opencode.ai/docs/windows-wsl/) for the best experience — inside WSL everything behaves as the Linux section above / **建议**：opencode 官方推荐在 [WSL](https://opencode.ai/docs/windows-wsl/) 中运行以获得最佳体验，WSL 内的行为与上方 Linux 一节完全一致
+
+### Comparison / 对比一览
+
+| 项目 Item | Linux / macOS | Windows |
+| --- | --- | --- |
+| 保存目录 Save directory | `~/opencode-autorecord` | `C:\Users\<用户名>\opencode-autorecord` |
+| 用户级配置 User-level config | `~/.config/opencode/opencode.json` | `%USERPROFILE%\.config\opencode\opencode.json` |
+| CLI 目录参数 CLI directory arg | `~/opencode-autorecord`（`~` 可展开） | 完整路径（`~` 不展开，如 `%USERPROFILE%\opencode-autorecord`） |
+| 文件名非法字符 Illegal filename chars | `/` | `\ / : * ? " < > |`（自动替换为 `-`） |
+
 
 ## License / 许可证
 
