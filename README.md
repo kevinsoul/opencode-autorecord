@@ -29,6 +29,12 @@
    - The homepage now only shows a project overview (name, last updated, session count) / 主页现在只显示项目概览（名称、最后更新时间、会话数量）
    - Clicking a project card opens the full session details in a modal / 点击项目卡片后，在弹窗中查看完整会话详情
 
+10. **Refactored file management & dual-tier HTML views** (v1.1.5) / **重构文件管理与双级 HTML 视图**（v1.1.5）：
+   - Code language detection for tool calls / 工具调用代码语言检测
+   - Related-topic sessions merged into a single file / 相同话题的会话合并到同一文件
+   - Dual-tier HTML views: `opencode-overview.html` (metadata only) + `projects/<project>.html` (full conversations) / 双级 HTML 视图：主索引页（仅元数据）+ 各项目页（完整对话）
+   - Stale project pages auto-removed on regeneration / 残留项目页面在视图再生成时自动清理
+
 
 ## Installation / 安装
 
