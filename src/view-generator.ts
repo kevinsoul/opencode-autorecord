@@ -259,6 +259,66 @@ function parseSessionStats(content: string): SessionStats | null {
 const SESSION_BLOCK_LINE_RE = /^<!-- AUTORECORD-SESSION-BLOCK: [^>]+ -->$/;
 const MAIN_USER_HEADING_RE = /^## 👤 User/;
 const ASSISTANT_HEADING_RE = /^### 🤖 Assistant/;
+/** 捕获 Assistant 标题后缀的首个标签（如 `[分析过程]`）；旧文件无后缀时不匹配。
+ *  兼容 formatter 的多标签拼接（` · 📦 Compaction Summary / 压缩摘要`），只取首个 */
+const ASSISTANT_TAG_CAPTURE_RE = /^### 🤖 Assistant\s+\[([^\]]+?)\]/;
+const REASONING_HEADER_PREFIX = '💭 **Reasoning:**';
+// 步骤组 id 计数器：同一条 ### 🤖 Assistant 消息内的全部 block 共享同一 stepId
+let assistantStepIdCounter = 0;
+
+type AssistantStepTag = NonNullable<ConversationBlock['stepTag']>;
+type AssistantBlockKind = NonNullable<ConversationBlock['kind']>;
+
+/** 从标题行解析步骤标签；无法识别的后缀（如纯 summary 标记）返回 undefined，由内容推导兜底 */
+function parseAssistantStepTag(line: string): AssistantStepTag | undefined {
+  const m = line.match(ASSISTANT_TAG_CAPTURE_RE);
+  if (!m) return undefined;
+  const first = m[1].split(' · ')[0].trim();
+  if (first === '分析过程' || first === '执行过程' || first === '回复内容') {
+    return first;
+  }
+  return undefined;
+}
+
+/**
+ * 判定/拆分 assistant 文本块：
+ * - 新格式：reasoning 有独立 `[step-end]` 边界，块内只有 💭 头 + `<details>` → 单 reasoning 块
+ * - 旧格式：reasoning 与正文合并在一个块（`*[step-start part]*`…`*[step-finish part]*` 区间），
+ *   按 `</details>` 所在行拆成 reasoning + reply 两块；无剩余正文则不拆
+ * 返回值保持原文顺序，供调用方按序 push（共享同一 stepId）
+ */
+function splitAssistantMessageBlock(content: string): Array<{ content: string; kind: AssistantBlockKind }> {
+  const trimmed = content.trim();
+  if (!trimmed) return [];
+  if (!trimmed.startsWith(REASONING_HEADER_PREFIX)) {
+    return [{ content: trimmed, kind: 'reply' }];
+  }
+
+  const lines = trimmed.split('\n');
+  let detailsEndIdx = -1;
+  for (let li = 0; li < lines.length; li++) {
+    if (lines[li].includes('</details>')) {
+      detailsEndIdx = li;
+      break;
+    }
+  }
+  if (detailsEndIdx === -1 || detailsEndIdx === lines.length - 1) {
+    return [{ content: trimmed, kind: 'reasoning' }];
+  }
+
+  const head = lines.slice(0, detailsEndIdx + 1).join('\n').trim();
+  const tailLines = lines.slice(detailsEndIdx + 1);
+  // 跳过紧随的空行，剩余内容视为回复正文；仅空白则不产生 reply 块
+  while (tailLines.length > 0 && !tailLines[0].trim()) {
+    tailLines.shift();
+  }
+  const tail = tailLines.join('\n').trim();
+  const result: Array<{ content: string; kind: AssistantBlockKind }> = [{ content: head, kind: 'reasoning' }];
+  if (tail && !tail.startsWith(REASONING_HEADER_PREFIX)) {
+    result.push({ content: tail, kind: 'reply' });
+  }
+  return result;
+}
 // 子会话区/文件头边界。刻意不含裸 `---`：正文（含代码围栏）中可能出现分隔线，不能作为终止符
 const CHILD_SECTION_BOUNDARY_RE =
   /^(### 📦 Subagent:|## Child Sessions$|# Topic:|<!-- AUTORECORD-SESSION-BLOCK:)/;
@@ -377,6 +437,17 @@ export function parseBlockConversation(blockContent: string): ConversationBlock[
         }
       }
 
+      // 步骤组：标题后缀标签优先，缺省时 section 结束后按内容推导
+      const headingStepTag = parseAssistantStepTag(line);
+      const stepId = ++assistantStepIdCounter;
+
+      /** 按拆分结果 push assistant 文本块（reasoning/reply 共享同一 stepId） */
+      const pushAssistantText = (rawContent: string): void => {
+        for (const seg of splitAssistantMessageBlock(rawContent)) {
+          blocks.push({ type: 'message', stepId, timestamp, content: seg.content, kind: seg.kind });
+        }
+      };
+
       // Collect message content until next block
       i += 1;
       const sectionStartIndex = blocks.length;
@@ -412,11 +483,7 @@ export function parseBlockConversation(blockContent: string): ConversationBlock[
           if (messageLines.length > 0 && !inToolBlock && !inStepBlock) {
             const msgContent = messageLines.join('\n').trim();
             if (msgContent) {
-              blocks.push({
-                type: 'message',
-                timestamp,
-                content: msgContent,
-              });
+              pushAssistantText(msgContent);
             }
             messageLines.length = 0;
           }
@@ -436,26 +503,24 @@ export function parseBlockConversation(blockContent: string): ConversationBlock[
 
         // Check for step finish: ends tool block and/or step block
         if (currentLine.includes('[step-finish')) {
+          // Close step block first if still open (old-format files interleave
+          // reasoning and tools inside one [step-start]…[step-finish] range;
+          // saving step content first keeps block order aligned with the source)
+          if (inStepBlock) {
+            const stepContent = stepLines.join('\n').trim();
+            if (stepContent) {
+              pushAssistantText(stepContent);
+            }
+            inStepBlock = false;
+            stepLines = [];
+          }
+
           // Save tool block
           if (toolBlock) {
             blocks.push(toolBlock);
           }
           inToolBlock = false;
           toolBlock = null;
-
-          // Also close step block if still open (step-finish part marks step end)
-          if (inStepBlock) {
-            const stepContent = stepLines.join('\n').trim();
-            if (stepContent) {
-              blocks.push({
-                type: 'message',
-                timestamp,
-                content: stepContent,
-              });
-            }
-            inStepBlock = false;
-            stepLines = [];
-          }
           i += 1;
           continue;
         }
@@ -466,11 +531,7 @@ export function parseBlockConversation(blockContent: string): ConversationBlock[
           if (messageLines.length > 0 && !inToolBlock && !inStepBlock) {
             const msgContent = messageLines.join('\n').trim();
             if (msgContent) {
-              blocks.push({
-                type: 'message',
-                timestamp,
-                content: msgContent,
-              });
+              pushAssistantText(msgContent);
             }
             messageLines.length = 0;
           }
@@ -486,11 +547,7 @@ export function parseBlockConversation(blockContent: string): ConversationBlock[
           // Save step block as assistant answer
           const stepContent = stepLines.join('\n').trim();
           if (stepContent) {
-            blocks.push({
-              type: 'message',
-              timestamp,
-              content: stepContent,
-            });
+            pushAssistantText(stepContent);
           }
           inStepBlock = false;
           stepLines = [];
@@ -573,11 +630,7 @@ export function parseBlockConversation(blockContent: string): ConversationBlock[
       if (messageLines.length > 0 && !inToolBlock && !inStepBlock) {
         const msgContent = messageLines.join('\n').trim();
         if (msgContent) {
-          blocks.push({
-            type: 'message',
-            timestamp,
-            content: msgContent,
-          });
+          pushAssistantText(msgContent);
         }
       }
 
@@ -585,11 +638,7 @@ export function parseBlockConversation(blockContent: string): ConversationBlock[
       if (stepLines.length > 0 && inStepBlock) {
         const stepContent = stepLines.join('\n').trim();
         if (stepContent) {
-          blocks.push({
-            type: 'message',
-            timestamp,
-            content: stepContent,
-          });
+          pushAssistantText(stepContent);
         }
       }
 
@@ -608,10 +657,24 @@ export function parseBlockConversation(blockContent: string): ConversationBlock[
         }
       }
 
-      // 本节产出的全部 block 归属当前轮次（assistant 角色）
+      // 本节产出的全部 block 归属当前轮次（assistant 角色）并聚合为同一步骤组；
+      // 标题未带标签时按内容推导（reasoning > tool > text，与 formatter getAssistantTag 一致）
+      let hasReasoningBlock = false;
+      let hasToolBlock = false;
       for (let bi = sectionStartIndex; bi < blocks.length; bi++) {
         blocks[bi].role = 'assistant';
+        blocks[bi].stepId = stepId;
+        if (blocks[bi].type === 'tool') {
+          hasToolBlock = true;
+        } else if (blocks[bi].kind === 'reasoning') {
+          hasReasoningBlock = true;
+        }
         if (currentTurn > 0) blocks[bi].turn = currentTurn;
+      }
+      const sectionStepTag: AssistantStepTag =
+        headingStepTag ?? (hasReasoningBlock ? '分析过程' : hasToolBlock ? '执行过程' : '回复内容');
+      for (let bi = sectionStartIndex; bi < blocks.length; bi++) {
+        blocks[bi].stepTag = sectionStepTag;
       }
 
       continue;
@@ -1159,6 +1222,23 @@ const DETAIL_CSS = `
     .tool-detail { margin-top: 12px; }
     .tool-detail-label { font-size: 12px; font-weight: 600; color: var(--apple-gray-5); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
     .tool-detail-content { position: relative; background: #1d1f21; border-radius: 8px; padding: 40px 12px 12px; font-family: 'SF Mono', SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13px; line-height: 1.5; overflow-x: auto; white-space: pre-wrap; color: #abb2bf; border: 1px solid #3a3d42; }
+    /* ── 助手步骤组：分析/执行/回复 层级容器 ── */
+    .conversation-block.step-group { border-left: 3px solid #AF52DE; background: linear-gradient(135deg, rgba(175,82,222,0.04), rgba(175,82,222,0.01)); }
+    .conversation-block.step-group.execution { border-left-color: #FF9500; background: linear-gradient(135deg, rgba(255,149,0,0.05), rgba(255,149,0,0.02)); }
+    .conversation-block.step-group.reply { border-left-color: #34C759; background: linear-gradient(135deg, rgba(52,199,89,0.05), rgba(52,199,89,0.02)); }
+    .step-group-header { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; padding-bottom: 10px; border-bottom: 1px solid var(--apple-gray-2); flex-wrap: wrap; }
+    .step-badge { font-family: var(--font-display); font-size: 12px; font-weight: 700; padding: 3px 10px; border-radius: 9999px; white-space: nowrap; }
+    .step-badge.analysis { color: #6941C6; background: rgba(175,82,222,0.12); }
+    .step-badge.execution { color: #B54708; background: rgba(255,149,0,0.14); }
+    .step-badge.reply { color: #1F9D41; background: rgba(52,199,89,0.14); }
+    .step-tool-count { font-size: 12px; font-weight: 600; color: #B54708; background: rgba(255,149,0,0.10); padding: 2px 8px; border-radius: 9999px; white-space: nowrap; }
+    .step-group-body { position: relative; margin-left: 4px; padding-left: 16px; border-left: 2px solid var(--apple-gray-2); display: flex; flex-direction: column; gap: 10px; }
+    .step-section-label { font-family: var(--font-display); font-size: 11px; font-weight: 700; letter-spacing: 0.03em; }
+    .step-section-label.analysis { color: #6941C6; }
+    .step-section-label.execution { color: #B54708; }
+    .step-section-label.reply { color: #1F9D41; }
+    .step-group-body .conversation-block { margin-bottom: 0; }
+    .step-tool-wrap { min-width: 0; }
     .tool-detail-content .code-block-header { border-radius: 8px 8px 0 0; }
     .tool-detail-content pre { border-radius: 8px; }
     .session-detail-note { text-align: center; padding: 40px 20px; color: var(--apple-gray-4); font-size: 14px; line-height: 1.8; }
@@ -1482,7 +1562,7 @@ function buildOverviewHtml(projects: ProjectData[], totalSessions: number): stri
 
 // ─── 项目页生成 ───────────────────────────────────────────────────────────────
 
-function buildProjectHtml(project: ProjectData): string {
+export function buildProjectHtml(project: ProjectData): string {
   const color = getProjectColor(project.name);
   const icon = getProjectIcon(project.name);
   const lastMod = formatTimestamp(project.lastModified);
@@ -1744,6 +1824,93 @@ function buildProjectHtml(project: ProjectData): string {
       return html;
     }
 
+    // ─── 助手步骤组：分析/执行/回复 层级渲染 ─────────────────────────────────
+
+    const STEP_TAG_META = {
+      '分析过程': { icon: '🧠', cls: 'analysis' },
+      '执行过程': { icon: '🔧', cls: 'execution' },
+      '回复内容': { icon: '💬', cls: 'reply' }
+    };
+
+    function hasStepInfo(b) {
+      return !!(b && b.role === 'assistant' && typeof b.stepId === 'number');
+    }
+
+    /** 相邻且 stepId 相同的 assistant 块聚合为步骤组；无 stepId 的旧数据各自成组（降级平铺） */
+    function groupAssistantSteps(blocks) {
+      const out = [];
+      let cur = null;
+      for (const b of blocks) {
+        if (cur && cur.join && hasStepInfo(b) && cur.id === b.stepId) {
+          cur.blocks.push(b);
+        } else {
+          cur = { id: hasStepInfo(b) ? b.stepId : null, join: hasStepInfo(b), blocks: [b] };
+          out.push(cur);
+        }
+      }
+      return out.map(g => g.blocks);
+    }
+
+    /** reasoning 卡片去掉 💭 头行，由小节标签替代 */
+    function stripReasoningHeader(content) {
+      const marker = '💭 **Reasoning:**';
+      if (!content || content.indexOf(marker) !== 0) return content;
+      const rest = content.substring(marker.length).trim();
+      return rest || content;
+    }
+
+    function renderStepGroup(gBlocks) {
+      const first = gBlocks[0];
+      const meta = STEP_TAG_META[first.stepTag] || { icon: '🤖', cls: 'analysis' };
+      let usageBlock = null;
+      let toolCount = 0;
+      for (const b of gBlocks) {
+        if (!usageBlock && b.usage) usageBlock = b;
+        if (b.type === 'tool') toolCount += 1;
+      }
+
+      let html = '<div class="conversation-block step-group ' + meta.cls + '">';
+      html += '<div class="step-group-header">';
+      html += '<span class="step-badge ' + meta.cls + '">' + meta.icon + ' ' + escapeHtml(first.stepTag || '助手') + '</span>';
+      if (toolCount > 0) {
+        html += '<span class="step-tool-count">🔧 ×' + toolCount + '</span>';
+      }
+      if (usageBlock) {
+        html += formatUsageBadge(usageBlock.usage);
+      }
+      html += '<span class="conversation-block-time">' + escapeHtml(first.timestamp || '') + '</span>';
+      html += '</div>';
+      html += '<div class="step-group-body">';
+
+      let toolLabeled = false;
+      for (const b of gBlocks) {
+        if (b.type === 'tool') {
+          if (!toolLabeled) {
+            html += '<div class="step-section-label execution">🔧 工具调用</div>';
+            toolLabeled = true;
+          }
+          html += '<div class="step-tool-wrap">' + renderBlockCard(b) + '</div>';
+        } else if (b.kind === 'reasoning') {
+          html += '<div class="step-section-label analysis">🧠 分析本体</div>';
+          html += '<div class="step-section-content conversation-block-content">' + formatConversationContent(stripReasoningHeader(b.content || '')) + '</div>';
+        } else {
+          html += '<div class="step-section-label reply">💬 回复内容</div>';
+          html += '<div class="step-section-content conversation-block-content">' + formatConversationContent(b.content || '') + '</div>';
+        }
+      }
+
+      html += '</div>';
+      html += '</div>';
+      return html;
+    }
+
+    /** 轮次体渲染：有 stepId 的 assistant 块聚合为步骤组容器，其余保持原卡片 */
+    function renderTurnBody(blocks) {
+      return groupAssistantSteps(blocks).map(gBlocks =>
+        hasStepInfo(gBlocks[0]) ? renderStepGroup(gBlocks) : gBlocks.map(renderBlockCard).join('')
+      ).join('');
+    }
+
     /**
      * 按用户提问划分轮次渲染（可折叠手风琴）。
      * 分段规则：turn===1 且 role==='user' 的块开启新的会话段（对应 topic 文件中的一个 session 块）；
@@ -1752,7 +1919,7 @@ function buildProjectHtml(project: ProjectData): string {
     function renderTurnSections(blocks) {
       const hasTurnInfo = blocks.some(b => b.role === 'user' && typeof b.turn === 'number' && b.turn > 0);
       if (!hasTurnInfo) {
-        return blocks.map(renderBlockCard).join('');
+        return renderTurnBody(blocks);
       }
 
       const sections = [];
@@ -1793,7 +1960,7 @@ function buildProjectHtml(project: ProjectData): string {
           }
           html += '</div>';
           html += '<div class="turn-body">';
-          group.blocks.forEach(b => { html += renderBlockCard(b); });
+          html += renderTurnBody(group.blocks);
           html += '</div>';
           html += '</div>';
         });
@@ -2097,7 +2264,7 @@ async function ensureProjectDetail(
  * 视图渲染结构版本。HTML 渲染逻辑发生结构性变化（如轮次手风琴分组）时 +1，
  * regenerateViews 检测到不一致会强制重建全部项目页（存量页面刷新）。
  */
-const VIEW_VERSION = 1;
+const VIEW_VERSION = 2;
 
 export async function regenerateViews(globalSaveDir: string): Promise<void> {
   const baseDir = globalSaveDir;

@@ -26,6 +26,12 @@ export interface ConversationBlock {
   role?: 'user' | 'assistant';
   /** 所属轮次（session block 内 1 起编号）；undefined 表示任何轮次开始之前的内容（如压缩摘要前置上下文） */
   turn?: number;
+  /** 同一条 Assistant 消息内的所有 block 共享同一 id；渲染端据此聚合为步骤组。旧缓存无此字段时渲染降级为平铺 */
+  stepId?: number;
+  /** 步骤标签：markdown 标题后缀优先，缺省时按 reasoning > tool > text 推导（与 formatter getAssistantTag 一致） */
+  stepTag?: '分析过程' | '执行过程' | '回复内容';
+  /** assistant 文本块细分：💭 Reasoning 开头为 reasoning，其余为 reply */
+  kind?: 'reasoning' | 'reply';
   toolName?: string;
   toolStatus?: string;
   toolInput?: string;
@@ -109,7 +115,7 @@ export type AutorecordIndex = UnifiedIndex;
 
 // v4: 新增 usage 统计（📊 元数据行 + 文件头用量表），旧缓存作废强制全量重扫
 // v5: ConversationBlock 新增 role/turn（按用户提问分轮次），旧缓存作废强制全量重扫
-const INDEX_VERSION = 5;
+const INDEX_VERSION = 6;
 const PRIMARY_INDEX_FILENAME = '.autorecord-index.json';
 const SECONDARY_INDEX_FILENAME = '.project-index.json';
 
