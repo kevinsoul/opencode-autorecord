@@ -3,14 +3,51 @@ import { join } from 'node:path';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+export interface BlockUsage {
+  providerID?: string;
+  modelID?: string;
+  input?: number;
+  output?: number;
+  reasoning?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  cost?: number;
+  durationMs?: number;
+  finish?: string;
+  error?: string;
+  compaction?: boolean;
+}
+
 export interface ConversationBlock {
   type: 'message' | 'tool';
   timestamp: string;
   content?: string;
+  /** 消息角色（message 块）；旧索引缓存无此字段，渲染端按序推断 */
+  role?: 'user' | 'assistant';
+  /** 所属轮次（session block 内 1 起编号）；undefined 表示任何轮次开始之前的内容（如压缩摘要前置上下文） */
+  turn?: number;
   toolName?: string;
   toolStatus?: string;
   toolInput?: string;
   toolOutput?: string;
+  /** Assistant message usage metadata (message blocks only) */
+  usage?: BlockUsage;
+}
+
+export interface SessionUsageRow {
+  calls: number;
+  input: number;
+  output: number;
+  reasoning: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cost: number;
+}
+
+export interface SessionStats {
+  byModel: Record<string, SessionUsageRow>;
+  totalCost: number;
+  totalTokens: number;
 }
 
 export interface SessionInfo {
@@ -20,6 +57,8 @@ export interface SessionInfo {
   category: string;
   filename: string;
   conversationBlocks?: ConversationBlock[];
+  /** Aggregated token/cost statistics parsed from the markdown header */
+  stats?: SessionStats;
 }
 
 export interface ProjectData {
@@ -44,6 +83,11 @@ interface ProjectMetaEntry {
 export interface PrimaryIndex {
   version: number;
   lastFullScan: number;
+  /**
+   * 视图渲染结构版本（view-generator.ts 中 VIEW_VERSION）。
+   * 与代码不一致时强制重建全部项目页（用于 HTML 渲染结构升级后的存量刷新）。
+   */
+  viewVersion?: number;
   projects: Record<string, ProjectMetaEntry>;
 }
 
@@ -63,9 +107,9 @@ export type AutorecordIndex = UnifiedIndex;
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-// v3: conversationBlocks 解析格式变更（step-start/step-finish 标记不再写入，
-// 日期正则锚定行首），旧缓存作废强制全量重扫
-const INDEX_VERSION = 3;
+// v4: 新增 usage 统计（📊 元数据行 + 文件头用量表），旧缓存作废强制全量重扫
+// v5: ConversationBlock 新增 role/turn（按用户提问分轮次），旧缓存作废强制全量重扫
+const INDEX_VERSION = 5;
 const PRIMARY_INDEX_FILENAME = '.autorecord-index.json';
 const SECONDARY_INDEX_FILENAME = '.project-index.json';
 

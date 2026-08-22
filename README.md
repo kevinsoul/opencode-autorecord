@@ -35,6 +35,13 @@
    - Dual-tier HTML views: `opencode-overview.html` (metadata only) + `projects/<project>.html` (full conversations) / 双级 HTML 视图：主索引页（仅元数据）+ 各项目页（完整对话）
    - Stale project pages auto-removed on regeneration / 残留项目页面在视图再生成时自动清理
 
+11. **Usage metadata & trajectory enrichment** (A1-A4) / **用量元数据与轨迹增强**（A1-A4）：
+    - Per-message model / token usage (input, output, reasoning, cache read/write) / cost and duration recorded for every assistant message (`📊 key=value` line in Markdown) / 每条助手消息记录模型、token 用量（输入/输出/推理/缓存读写）、成本与耗时（Markdown 中为 `📊 key=value` 元数据行）
+    - Typed finish reasons: normal vs truncated (`max-tokens`) vs interrupted/failed, with warning blocks in Markdown and colored badges in HTML / 类型化结束原因：区分正常结束、输出截断（max-tokens）与中断/失败，Markdown 输出警告块，HTML 显示彩色徽章
+    - Compaction boundary marker: compaction summary messages are tagged (`📦 Compaction Summary`) / 压缩边界标记：压缩摘要消息带 `📦 Compaction Summary` 标签
+    - Injected context distinction: system-injected text parts are marked as `[系统注入上下文 / Injected Context]`, separating real user input from context injection / 注入上下文区分：系统注入的文本片段标注 `[系统注入上下文]`，与真人输入区分
+    - Session-level usage table at the top of each Markdown file + session cost/token stats bar and per-message badges in the HTML detail modal / Markdown 文件头新增会话级用量统计表；HTML 会话详情弹窗顶部显示成本/token 统计条，消息块显示用量徽章
+
 
 ## Installation / 安装
 

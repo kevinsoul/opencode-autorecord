@@ -3,6 +3,7 @@ import { join, basename } from 'node:path';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { version: pluginVersion } = require('../package.json');
+import { INJECTED_CONTEXT_MARKER, TURN_SEPARATOR } from './types.js';
 import {
   saveIndex,
   updateFileIndex,
@@ -15,6 +16,8 @@ import {
   type SessionInfo,
   type ProjectData,
   type ConversationBlock,
+  type BlockUsage,
+  type SessionStats,
 } from './index-manager.js';
 
 // Re-export types for backward compatibility
@@ -139,16 +142,230 @@ function categorizeSession(title: string): string {
   return '开发讨论';
 }
 
-function extractFullConversation(content: string): ConversationBlock[] {
-  const blocks: ConversationBlock[] = [];
+/**
+ * Parse the `📊 key=value ...` usage metadata line emitted by formatter.ts.
+ */
+function parseAssistantMetaLine(line: string): BlockUsage | null {
+  if (!line.startsWith('📊')) return null;
+
+  const usage: BlockUsage = {};
+  const pairRe = /(\w+)=(?:"([^"]*)"|(\S+))/g;
+  let match: RegExpExecArray | null;
+  while ((match = pairRe.exec(line)) !== null) {
+    const key = match[1];
+    const value = match[2] !== undefined ? match[2] : (match[3] ?? '');
+    switch (key) {
+      case 'provider':
+        usage.providerID = value;
+        break;
+      case 'model':
+        usage.modelID = value;
+        break;
+      case 'in':
+        usage.input = Number(value);
+        break;
+      case 'out':
+        usage.output = Number(value);
+        break;
+      case 'reason':
+        usage.reasoning = Number(value);
+        break;
+      case 'cacheread':
+        usage.cacheRead = Number(value);
+        break;
+      case 'cachewrite':
+        usage.cacheWrite = Number(value);
+        break;
+      case 'cost':
+        usage.cost = Number(value.replace(/^\$/, ''));
+        break;
+      case 'dur':
+        usage.durationMs = Math.round(parseFloat(value) * 1000);
+        break;
+      case 'finish':
+        usage.finish = value;
+        break;
+      case 'error':
+        usage.error = value;
+        break;
+    }
+  }
+  // 裸键（无 =）：压缩摘要标记
+  if (/\bcompaction\b/.test(line)) {
+    usage.compaction = true;
+  }
+
+  return Object.keys(usage).length > 0 ? usage : null;
+}
+
+const USAGE_TABLE_HEADER =
+  '| Model | Calls | Input | Output | Reasoning | Cache Read | Cache Write | Cost ($) |';
+const USAGE_TABLE_ROW_RE =
+  /^\| (.+?) \| (\d+) \| (\d+) \| (\d+) \| (\d+) \| (\d+) \| (\d+) \| ([\d.]+) \|$/;
+
+/**
+ * Parse session-level usage statistics from markdown header tables
+ * (one table per session block; models are merged across blocks).
+ * Returns null for files without statistics tables.
+ */
+function parseSessionStats(content: string): SessionStats | null {
   const lines = content.split('\n');
+  const stats: SessionStats = { byModel: {}, totalCost: 0, totalTokens: 0 };
+  let found = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].trim() !== USAGE_TABLE_HEADER) continue;
+    found = true;
+
+    for (let j = i + 1; j < lines.length; j++) {
+      const raw = lines[j].trim();
+      const m = raw.match(USAGE_TABLE_ROW_RE);
+      if (!m) {
+        // 表头与数据行之间的分隔行（|---|...）继续读，其余行视为表格结束
+        if (/^\|(?:\s*:?-+:?\s*\|)+$/.test(raw)) continue;
+        break;
+      }
+      if (m[1].trim() === '**Total**') break;
+
+      const model = m[1].trim();
+      let row = stats.byModel[model];
+      if (!row) {
+        row = { calls: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+        stats.byModel[model] = row;
+      }
+      row.calls += Number(m[2]);
+      row.input += Number(m[3]);
+      row.output += Number(m[4]);
+      row.reasoning += Number(m[5]);
+      row.cacheRead += Number(m[6]);
+      row.cacheWrite += Number(m[7]);
+      row.cost += Number(m[8]);
+      i = j;
+    }
+  }
+
+  if (!found) return null;
+
+  for (const row of Object.values(stats.byModel)) {
+    stats.totalCost += row.cost;
+    stats.totalTokens += row.input + row.output + row.reasoning;
+  }
+  return stats;
+}
+
+// ─── Session Block Splitting & Turn Boundaries ───────────────────────────────
+
+const SESSION_BLOCK_LINE_RE = /^<!-- AUTORECORD-SESSION-BLOCK: [^>]+ -->$/;
+const MAIN_USER_HEADING_RE = /^## 👤 User/;
+const ASSISTANT_HEADING_RE = /^### 🤖 Assistant/;
+// 子会话区/文件头边界。刻意不含裸 `---`：正文（含代码围栏）中可能出现分隔线，不能作为终止符
+const CHILD_SECTION_BOUNDARY_RE =
+  /^(### 📦 Subagent:|## Child Sessions$|# Topic:|<!-- AUTORECORD-SESSION-BLOCK:)/;
+
+function isConversationBoundary(line: string): boolean {
+  return (
+    ASSISTANT_HEADING_RE.test(line) ||
+    MAIN_USER_HEADING_RE.test(line) ||
+    CHILD_SECTION_BOUNDARY_RE.test(line)
+  );
+}
+
+/**
+ * 按 `<!-- AUTORECORD-SESSION-BLOCK -->` 注释把 topic 文件切成独立会话块。
+ * 一个 md 文件可含同一主题的多次会话，必须逐块解析，轮次编号才不会跨块串扰；
+ * 注释之前的文件头（# Topic / ---）被丢弃。无注释的旧文件整文件视为单块。
+ */
+export function splitSessionBlocks(content: string): string[] {
+  const lines = content.split('\n');
+  const starts: number[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (SESSION_BLOCK_LINE_RE.test(lines[i])) starts.push(i);
+  }
+  if (starts.length === 0) return [content];
+
+  const chunks: string[] = [];
+  for (let c = 0; c < starts.length; c++) {
+    const from = starts[c] + 1;
+    const to = c + 1 < starts.length ? starts[c + 1] : lines.length;
+    chunks.push(lines.slice(from, to).join('\n'));
+  }
+  return chunks;
+}
+
+interface UserSection {
+  timestamp: string;
+  bodyLines: string[];
+  nextIndex: number;
+}
+
+/** 收集主会话级 User 消息正文，直到下一个精确对话边界；代码围栏内的行不做边界判定 */
+function collectUserSection(lines: string[], startIndex: number): UserSection {
+  let timestamp = '';
+  let i = startIndex + 1;
+  if (i < lines.length) {
+    const timeMatch = lines[i].match(/\*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\*/);
+    if (timeMatch) {
+      timestamp = timeMatch[1];
+      i += 1;
+    }
+  }
+
+  const bodyLines: string[] = [];
+  let inFence = false;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (line.trimStart().startsWith('```')) {
+      inFence = !inFence;
+      bodyLines.push(line);
+      i += 1;
+      continue;
+    }
+    if (!inFence && isConversationBoundary(line)) break;
+    bodyLines.push(line);
+    i += 1;
+  }
+
+  return { timestamp, bodyLines, nextIndex: i };
+}
+
+/**
+ * fallback 场景下判定 user 消息是否为纯系统注入（synthetic-only）：
+ * 正文首个非空行即注入标记。混合消息（注入 + 真实文本并存）按真实输入处理，
+ * 与 formatter 的 isRealUserInput 语义保持一致。
+ */
+function isSyntheticOnlyUserBody(bodyLines: string[]): boolean {
+  for (const raw of bodyLines) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    return trimmed === INJECTED_CONTEXT_MARKER;
+  }
+  return false;
+}
+
+/**
+ * 解析单个 session block 内的对话，按主会话级用户提问划分轮次。
+ * - `<!-- AUTORECORD-TURN -->` 分隔符：新轮次起点（formatter 对每条真实输入写入）
+ * - 旧格式 fallback：以 `## 👤 User` 标题为等价边界，但 synthetic-only
+ *   注入消息不开新轮次，归入当前轮次（turn=0 表示任何轮次之前的前置内容）
+ */
+export function parseBlockConversation(blockContent: string): ConversationBlock[] {
+  const blocks: ConversationBlock[] = [];
+  const lines = blockContent.split('\n');
   let i = 0;
+  let currentTurn = 0;
+  let sawTurnSeparator = false;
 
   while (i < lines.length) {
     const line = lines[i];
 
+    if (line.trim() === TURN_SEPARATOR) {
+      sawTurnSeparator = true;
+      i += 1;
+      continue;
+    }
+
     // Detect assistant message block
-    if (line.includes('### 🤖 Assistant')) {
+    if (ASSISTANT_HEADING_RE.test(line)) {
       // Extract timestamp from next line
       let timestamp = '';
       if (i + 1 < lines.length) {
@@ -161,6 +378,8 @@ function extractFullConversation(content: string): ConversationBlock[] {
 
       // Collect message content until next block
       i += 1;
+      const sectionStartIndex = blocks.length;
+      let sectionMeta: BlockUsage | null = null;
       const messageLines: string[] = [];
       let inToolBlock = false;
       let toolBlock: ConversationBlock | null = null;
@@ -170,9 +389,19 @@ function extractFullConversation(content: string): ConversationBlock[] {
       while (i < lines.length) {
         const currentLine = lines[i];
 
-        // Check for next assistant block, user block, or end of conversation
-        if (currentLine.includes('### 🤖 Assistant') || currentLine.startsWith('---') || currentLine.includes('## 👤 User')) {
+        // 精确边界锚定（不用裸 --- ：工具输出/正文中可能出现分隔线）
+        if (isConversationBoundary(currentLine)) {
           break;
+        }
+
+        // Usage metadata line (📊 key=value ...), not part of the visible content
+        if (!inToolBlock && !inStepBlock && currentLine.startsWith('📊')) {
+          const parsed = parseAssistantMetaLine(currentLine);
+          if (parsed) {
+            sectionMeta = parsed;
+            i += 1;
+            continue;
+          }
         }
 
         // Check for tool block start
@@ -368,6 +597,49 @@ function extractFullConversation(content: string): ConversationBlock[] {
         blocks.push(toolBlock);
       }
 
+      // Attach usage metadata to the first message block of this section
+      if (sectionMeta) {
+        for (let bi = sectionStartIndex; bi < blocks.length; bi++) {
+          if (blocks[bi].type === 'message') {
+            blocks[bi].usage = sectionMeta;
+            break;
+          }
+        }
+      }
+
+      // 本节产出的全部 block 归属当前轮次（assistant 角色）
+      for (let bi = sectionStartIndex; bi < blocks.length; bi++) {
+        blocks[bi].role = 'assistant';
+        if (currentTurn > 0) blocks[bi].turn = currentTurn;
+      }
+
+      continue;
+    }
+
+    // 主会话级 User 消息：轮次边界判定
+    if (MAIN_USER_HEADING_RE.test(line)) {
+      const section = collectUserSection(lines, i);
+      i = section.nextIndex;
+
+      let turn: number | undefined;
+      if (sawTurnSeparator || !isSyntheticOnlyUserBody(section.bodyLines)) {
+        currentTurn += 1;
+        turn = currentTurn;
+      } else {
+        turn = currentTurn > 0 ? currentTurn : undefined;
+      }
+      sawTurnSeparator = false;
+
+      const content = section.bodyLines.join('\n').trim();
+      if (content) {
+        blocks.push({
+          type: 'message',
+          role: 'user',
+          turn,
+          timestamp: section.timestamp,
+          content,
+        });
+      }
       continue;
     }
 
@@ -375,6 +647,14 @@ function extractFullConversation(content: string): ConversationBlock[] {
   }
 
   return blocks;
+}
+
+/**
+ * 以文件为单位解析对话。先按 SESSION-BLOCK 注释切成独立会话块再逐块解析，
+ * 保证同一 topic 文件中多个会话各自从第 1 轮编号、互不串扰。
+ */
+export function extractFullConversation(content: string): ConversationBlock[] {
+  return splitSessionBlocks(content).flatMap(parseBlockConversation);
 }
 
 function extractSessionInfo(filePath: string, content: string): SessionInfo | null {
@@ -395,16 +675,20 @@ function extractSessionInfo(filePath: string, content: string): SessionInfo | nu
 
   const blocks = extractFullConversation(content);
 
-  // Extract user request from first message block
+  // Extract user request from the first real user message (skip synthetic-only injections)
   let userRequest = '无明确请求';
-  const firstMessage = blocks.find((b) => b.type === 'message');
-  if (firstMessage?.content) {
-    userRequest = firstMessage.content
-      .replace(/\[.*?\]/g, '')
-      .replace(/<.*?>/g, '')
-      .trim();
-    if (userRequest.length > 200) {
-      userRequest = userRequest.substring(0, 200) + '...';
+  const firstUserMessage = blocks.find((b) => b.role === 'user' && b.content);
+  if (firstUserMessage?.content) {
+    const realLine = firstUserMessage.content
+      .split('\n')
+      .map((l) => l.trim())
+      .find((l) => l !== '' && !l.startsWith(INJECTED_CONTEXT_MARKER));
+    if (realLine) {
+      const cleaned = realLine
+        .replace(/\[.*?\]/g, '')
+        .replace(/<.*?>/g, '')
+        .trim();
+      userRequest = cleaned.length > 200 ? cleaned.substring(0, 200) + '...' : (cleaned || '无明确请求');
     }
   }
 
@@ -415,6 +699,7 @@ function extractSessionInfo(filePath: string, content: string): SessionInfo | nu
     category: categorizeSession(title),
     filename: basename(filePath),
     conversationBlocks: blocks,
+    stats: parseSessionStats(content) ?? undefined,
   };
 }
 
@@ -876,6 +1161,30 @@ const DETAIL_CSS = `
     .tool-detail-content .code-block-header { border-radius: 8px 8px 0 0; }
     .tool-detail-content pre { border-radius: 8px; }
     .session-detail-note { text-align: center; padding: 40px 20px; color: var(--apple-gray-4); font-size: 14px; line-height: 1.8; }
+    .session-stats-bar { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+    .session-stats-bar.hidden { display: none; }
+    .stats-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: var(--apple-gray-5); background: var(--apple-gray-1); border: 1px solid var(--apple-gray-2); padding: 3px 10px; border-radius: 9999px; white-space: nowrap; }
+    .stats-chip.cost { color: #FF9500; background: rgba(255,149,0,0.10); border-color: rgba(255,149,0,0.2); }
+    .usage-badge { display: inline-flex; align-items: center; gap: 6px; margin-left: 10px; font-size: 11px; font-weight: 500; color: var(--apple-gray-5); background: rgba(142,142,147,0.10); border: 1px solid rgba(142,142,147,0.18); padding: 2px 9px; border-radius: 9999px; white-space: nowrap; flex-shrink: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; max-width: 50%; box-sizing: border-box; }
+    .usage-badge.warn { color: #FF9500; background: rgba(255,149,0,0.10); border-color: rgba(255,149,0,0.25); }
+    .usage-badge.error { color: #FF3B30; background: rgba(255,59,48,0.10); border-color: rgba(255,59,48,0.25); }
+    .usage-badge.compaction { color: #AF52DE; background: rgba(175,82,222,0.10); border-color: rgba(175,82,222,0.25); }
+    .session-section-divider { display: flex; align-items: center; gap: 12px; margin: 28px 0 20px; color: var(--apple-gray-4); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+    .session-section-divider::before, .session-section-divider::after { content: ''; flex: 1; height: 1px; background: var(--apple-gray-2); }
+    .turn-group { background: var(--apple-white); border: 1px solid var(--apple-gray-2); border-radius: 14px; margin-bottom: 14px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); overflow: hidden; }
+    .turn-group:last-child { margin-bottom: 0; }
+    .turn-header { display: flex; align-items: center; gap: 12px; padding: 13px 16px; cursor: pointer; user-select: none; transition: background 0.2s ease; }
+    .turn-header:hover { background: var(--apple-gray-1); }
+    .turn-chevron { flex-shrink: 0; color: var(--apple-gray-4); transition: transform 0.25s cubic-bezier(0.4,0,0.2,1); }
+    .turn-group.open .turn-chevron { transform: rotate(90deg); }
+    .turn-badge { flex-shrink: 0; font-family: var(--font-display); font-size: 11px; font-weight: 700; letter-spacing: 0.03em; color: var(--apple-white); background: var(--apple-blue); padding: 3px 10px; border-radius: 9999px; white-space: nowrap; }
+    .turn-badge.context { color: var(--apple-gray-5); background: var(--apple-gray-2); }
+    .turn-summary { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; color: var(--apple-black); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .turn-meta { flex-shrink: 0; font-size: 12px; color: var(--apple-gray-4); }
+    .turn-body { display: none; padding: 14px 16px 16px; border-top: 1px solid var(--apple-gray-2); background: var(--apple-gray-1); }
+    .turn-group.open .turn-body { display: block; }
+    .turn-body .conversation-block { margin-bottom: 14px; }
+    .turn-body .conversation-block:last-child { margin-bottom: 0; }
     @media (max-width: 768px) {
       .session-detail-modal-container { width: 100%; max-height: 100%; border-radius: 0; }
       .session-detail-modal-header { padding: 24px 24px 20px; }
@@ -883,6 +1192,9 @@ const DETAIL_CSS = `
       .session-detail-modal-title-content h2 { font-size: 18px; }
       .session-detail-modal-content { padding: 24px 24px 32px; }
       .conversation-block { padding: 16px; }
+      .turn-header { padding: 11px 12px; gap: 8px; }
+      .turn-summary { font-size: 13px; }
+      .turn-body { padding: 12px; }
     }
 `;
 
@@ -1199,6 +1511,7 @@ function buildProjectHtml(project: ProjectData): string {
       date: s.date,
       category: s.category,
       filename: s.filename,
+      stats: s.stats,
       conversationBlocks: detailFilenames.has(s.filename) ? (s.conversationBlocks || []) : undefined,
     })),
   };
@@ -1303,6 +1616,7 @@ function buildProjectHtml(project: ProjectData): string {
           <div class="session-detail-modal-title-content">
             <h2 id="sessionDetailModalTitle">会话标题</h2>
             <span class="session-date" id="sessionDetailModalDate">--</span>
+            <div class="session-stats-bar" id="sessionDetailModalStats"></div>
           </div>
         </div>
         <button class="session-detail-modal-close" data-action="close-session-detail">
@@ -1316,6 +1630,7 @@ function buildProjectHtml(project: ProjectData): string {
 
   <script>
     const projectData = ${JSON.stringify(projectData).replace(/<\//g, '<\\/').replace(/<!--/g, '<\\u0021--')};
+    const INJECTED_MARKER = ${JSON.stringify(INJECTED_CONTEXT_MARKER)};
 
     function escapeHtml(text) {
       const div = document.createElement('div');
@@ -1327,58 +1642,60 @@ function buildProjectHtml(project: ProjectData): string {
       return projectData.sessions.find(s => s.filename === filename);
     }
 
+    function fmtNum(n) {
+      return Number(n || 0).toLocaleString('en-US');
+    }
+
+    function renderSessionStatsBar(stats) {
+      const bar = document.getElementById('sessionDetailModalStats');
+      if (!bar) return;
+      if (stats && (stats.totalCost > 0 || stats.totalTokens > 0)) {
+        const chips = [
+          '<span class="stats-chip cost">💰 $' + Number(stats.totalCost).toFixed(4) + '</span>',
+          '<span class="stats-chip">🪙 ' + fmtNum(stats.totalTokens) + ' tokens</span>'
+        ];
+        Object.entries(stats.byModel || {}).forEach(([model, row]) => {
+          chips.push('<span class="stats-chip">' + escapeHtml(model) + ' × ' + (row.calls || 0) + '</span>');
+        });
+        bar.innerHTML = chips.join('');
+        bar.classList.remove('hidden');
+      } else {
+        bar.innerHTML = '';
+        bar.classList.add('hidden');
+      }
+    }
+
+    function formatUsageBadge(u) {
+      if (!u) return '';
+      const bits = [];
+      if (u.modelID) bits.push(u.modelID);
+      const inTok = u.input || 0, outTok = u.output || 0;
+      if (inTok || outTok) bits.push('↑' + fmtNum(inTok) + ' ↓' + fmtNum(outTok));
+      if (u.cost) bits.push('$' + Number(u.cost).toFixed(4));
+      if (u.durationMs) bits.push((u.durationMs / 1000).toFixed(1) + 's');
+
+      let cls = 'usage-badge';
+      let prefix = '';
+      if (u.error) { cls += ' error'; prefix = '❌ '; }
+      else if (u.finish && /max|length/i.test(u.finish)) { cls += ' warn'; prefix = '⚠️ '; }
+      else if (u.finish && /abort|cancel|interrupt/i.test(u.finish)) { cls += ' warn'; prefix = '🛑 '; }
+      if (u.compaction) { cls += ' compaction'; prefix += '📦 '; }
+
+      return '<span class="' + cls + '">' + prefix + escapeHtml(bits.join(' · ')) + '</span>';
+    }
+
     function openSessionDetailModal(filename) {
       const session = findSessionByFilename(filename);
       if (!session) return;
       document.getElementById('sessionDetailModalTitle').textContent = session.title;
       document.getElementById('sessionDetailModalDate').textContent = session.date;
+      renderSessionStatsBar(session.stats);
 
       const contentEl = document.getElementById('sessionDetailModalContent');
       let html = '';
 
       if (session.conversationBlocks && session.conversationBlocks.length > 0) {
-        session.conversationBlocks.forEach((block, index) => {
-          if (block.type === 'message') {
-            const isFirst = index === 0;
-            const roleClass = isFirst ? 'user' : 'assistant';
-            const roleText = isFirst ? '用户' : '助手';
-            const content = block.content || '';
-
-            html += '<div class="conversation-block">';
-            html += '<div class="conversation-block-header">';
-            html += '<span class="conversation-block-role ' + roleClass + '">' + roleText + '</span>';
-            html += '<span class="conversation-block-time">' + escapeHtml(block.timestamp) + '</span>';
-            html += '</div>';
-            html += '<div class="conversation-block-content">' + formatConversationContent(content) + '</div>';
-            html += '</div>';
-          } else if (block.type === 'tool') {
-            html += '<div class="conversation-block tool-block">';
-            html += '<div class="conversation-block-header">';
-            html += '<span class="conversation-block-role tool">🔧 Tool: ' + escapeHtml(block.toolName || 'unknown') + '</span>';
-            html += '<span class="conversation-block-time">' + escapeHtml(block.timestamp) + '</span>';
-            html += '</div>';
-
-            if (block.toolStatus) {
-              html += '<div style="margin-bottom: 12px;"><span style="font-size: 12px; font-weight: 600; color: var(--apple-gray-5); text-transform: uppercase; letter-spacing: 0.05em;">状态</span><span style="margin-left: 8px; font-size: 13px; color: var(--apple-black);">' + escapeHtml(block.toolStatus) + '</span></div>';
-            }
-
-            if (block.toolInput) {
-              html += '<div class="tool-detail">';
-              html += '<div class="tool-detail-label">输入</div>';
-              html += '<div class="tool-detail-content">' + formatToolContent(block.toolInput) + '</div>';
-              html += '</div>';
-            }
-
-            if (block.toolOutput) {
-              html += '<div class="tool-detail">';
-              html += '<div class="tool-detail-label">输出</div>';
-              html += '<div class="tool-detail-content">' + formatToolContent(block.toolOutput) + '</div>';
-              html += '</div>';
-            }
-
-            html += '</div>';
-          }
-        });
+        html = renderTurnSections(session.conversationBlocks);
       } else {
         html = '<div class="session-detail-note">该会话时间较早，HTML 中未内联完整对话内容。<br>完整内容请查看对应 Markdown 文件：<br><code>' + escapeHtml(session.filename) + '</code></div>';
       }
@@ -1386,9 +1703,101 @@ function buildProjectHtml(project: ProjectData): string {
       contentEl.innerHTML = html;
       document.getElementById('sessionDetailModalOverlay').classList.add('active');
       document.body.style.overflow = 'hidden';
-      if (typeof Prism !== 'undefined') {
-        Prism.highlightAll();
+    }
+
+    function renderBlockCard(block) {
+      if (block.type === 'message') {
+        const isUser = block.role === 'user';
+        const roleClass = isUser ? 'user' : 'assistant';
+        const roleText = isUser ? '用户' : '助手';
+        let html = '<div class="conversation-block">';
+        html += '<div class="conversation-block-header">';
+        html += '<span class="conversation-block-role ' + roleClass + '">' + roleText + '</span>';
+        if (!isUser && block.usage) {
+          html += formatUsageBadge(block.usage);
+        }
+        html += '<span class="conversation-block-time">' + escapeHtml(block.timestamp) + '</span>';
+        html += '</div>';
+        html += '<div class="conversation-block-content">' + formatConversationContent(block.content || '') + '</div>';
+        html += '</div>';
+        return html;
       }
+
+      let html = '<div class="conversation-block tool-block">';
+      html += '<div class="conversation-block-header">';
+      html += '<span class="conversation-block-role tool">🔧 Tool: ' + escapeHtml(block.toolName || 'unknown') + '</span>';
+      html += '<span class="conversation-block-time">' + escapeHtml(block.timestamp) + '</span>';
+      html += '</div>';
+
+      if (block.toolStatus) {
+        html += '<div style="margin-bottom: 12px;"><span style="font-size: 12px; font-weight: 600; color: var(--apple-gray-5); text-transform: uppercase; letter-spacing: 0.05em;">状态</span><span style="margin-left: 8px; font-size: 13px; color: var(--apple-black);">' + escapeHtml(block.toolStatus) + '</span></div>';
+      }
+      if (block.toolInput) {
+        html += '<div class="tool-detail"><div class="tool-detail-label">输入</div><div class="tool-detail-content">' + formatToolContent(block.toolInput) + '</div></div>';
+      }
+      if (block.toolOutput) {
+        html += '<div class="tool-detail"><div class="tool-detail-label">输出</div><div class="tool-detail-content">' + formatToolContent(block.toolOutput) + '</div></div>';
+      }
+
+      html += '</div>';
+      return html;
+    }
+
+    /**
+     * 按用户提问划分轮次渲染（可折叠手风琴）。
+     * 分段规则：turn===1 且 role==='user' 的块开启新的会话段（对应 topic 文件中的一个 session 块）；
+     * 段内按 turn 编号分组。旧数据（无 role/turn 字段）降级为平铺渲染。
+     */
+    function renderTurnSections(blocks) {
+      const hasTurnInfo = blocks.some(b => b.role === 'user' && typeof b.turn === 'number' && b.turn > 0);
+      if (!hasTurnInfo) {
+        return blocks.map(renderBlockCard).join('');
+      }
+
+      const sections = [];
+      for (const b of blocks) {
+        if (sections.length === 0 || (b.role === 'user' && b.turn === 1)) {
+          sections.push([]);
+        }
+        const sec = sections[sections.length - 1];
+        const turnKey = typeof b.turn === 'number' && b.turn > 0 ? b.turn : 0;
+        let group = sec[sec.length - 1];
+        if (!group || group.key !== turnKey) {
+          group = { key: turnKey, blocks: [] };
+          sec.push(group);
+        }
+        group.blocks.push(b);
+      }
+
+      let html = '';
+      sections.forEach((sec, si) => {
+        if (si > 0) {
+          html += '<div class="session-section-divider"><span>续篇会话 · ' + (si + 1) + '/' + sections.length + '</span></div>';
+        }
+        sec.forEach((group) => {
+          const firstUser = group.blocks.find(b => b.role === 'user' && b.content);
+          const summarySource = (firstUser ? firstUser.content : '') || '';
+          const summaryLine = summarySource.split('\\n').map(l => l.trim()).find(l => l && l.indexOf(INJECTED_MARKER) !== 0) || '';
+          const shortSummary = summaryLine.length > 80 ? summaryLine.substring(0, 80) + '…' : (summaryLine || '(无文本)');
+          const timeLabel = firstUser ? firstUser.timestamp : '';
+          const isContext = group.key === 0;
+
+          html += '<div class="turn-group" data-turn-group>';
+          html += '<div class="turn-header" data-action="toggle-turn">';
+          html += '<svg class="turn-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>';
+          html += '<span class="turn-badge' + (isContext ? ' context' : '') + '">' + (isContext ? '上下文' : '第 ' + group.key + ' 轮') + '</span>';
+          html += '<span class="turn-summary">' + escapeHtml(shortSummary) + '</span>';
+          if (timeLabel) {
+            html += '<span class="turn-meta">' + escapeHtml(timeLabel) + '</span>';
+          }
+          html += '</div>';
+          html += '<div class="turn-body">';
+          group.blocks.forEach(b => { html += renderBlockCard(b); });
+          html += '</div>';
+          html += '</div>';
+        });
+      });
+      return html;
     }
 
     function closeSessionDetailModal() {
@@ -1564,6 +1973,17 @@ function buildProjectHtml(project: ProjectData): string {
         case 'close-session-detail':
           closeSessionDetailModal();
           break;
+        case 'toggle-turn': {
+          const groupEl = actionEl.closest('[data-turn-group]');
+          if (groupEl) {
+            groupEl.classList.toggle('open');
+            const body = groupEl.querySelector('.turn-body');
+            if (groupEl.classList.contains('open') && body && typeof Prism !== 'undefined' && Prism.highlightAllUnder) {
+              Prism.highlightAllUnder(body);
+            }
+          }
+          break;
+        }
       }
     });
     document.addEventListener('DOMContentLoaded', function() {
@@ -1668,6 +2088,12 @@ async function ensureProjectDetail(
 
 // ─── Main Entry Point ────────────────────────────────────────────────────────
 
+/**
+ * 视图渲染结构版本。HTML 渲染逻辑发生结构性变化（如轮次手风琴分组）时 +1，
+ * regenerateViews 检测到不一致会强制重建全部项目页（存量页面刷新）。
+ */
+const VIEW_VERSION = 1;
+
 export async function regenerateViews(globalSaveDir: string): Promise<void> {
   const baseDir = globalSaveDir;
   const logPath = join(baseDir, '.autorecord-views.log');
@@ -1720,6 +2146,13 @@ export async function regenerateViews(globalSaveDir: string): Promise<void> {
     } else {
       const totalSessions = projects.reduce((sum, p) => sum + p.count, 0);
 
+      // 渲染结构版本不一致（代码升级）时强制重建全部项目页
+      const forceAllPages = index.primary.viewVersion !== VIEW_VERSION;
+      if (forceAllPages) {
+        await writeViewLog(logPath, `INFO: View structure version changed (cached: ${String(index.primary.viewVersion)}, current: ${VIEW_VERSION}), rebuilding all project pages`);
+        index.primary.viewVersion = VIEW_VERSION;
+      }
+
       // 1. 主索引页：仅元数据（剥离对话内容，避免文件无限膨胀）
       const metaProjects = projects.map((p) => ({
         ...p,
@@ -1733,7 +2166,7 @@ export async function regenerateViews(globalSaveDir: string): Promise<void> {
       let rebuiltCount = 0;
 
       for (const p of projects) {
-        const needsRebuild = missingDetail.has(p.name) || !unchangedProjects.includes(p.name);
+        const needsRebuild = forceAllPages || missingDetail.has(p.name) || !unchangedProjects.includes(p.name);
         if (!needsRebuild) continue;
 
         const fullProject = await ensureProjectDetail(p, baseDir, index);

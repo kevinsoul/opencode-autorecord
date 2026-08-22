@@ -359,12 +359,61 @@ function logApp(
 }
 
 function convertMessages(rawMessages: SessionMessagesResponse): MessageData[] {
-  return rawMessages.map(({ info, parts }) => ({
-    id: info.id,
-    role: info.role,
-    parts: parts.map(convertPart),
-    createdAt: info.time?.created || Date.now(),
-  }));
+  return rawMessages.map(({ info, parts }) => {
+    const base: MessageData = {
+      id: info.id,
+      role: info.role,
+      parts: parts.map(convertPart),
+      createdAt: info.time?.created || Date.now(),
+    };
+
+    if (info.role !== 'assistant') {
+      return base;
+    }
+
+    // Assistant-only metadata (A1/A2/A3): model, usage, cost, duration,
+    // finish reason, structured error and compaction-summary marker.
+    const completed = info.time?.completed;
+    if (completed && completed > base.createdAt) {
+      base.durationMs = completed - base.createdAt;
+    }
+    base.modelID = info.modelID || undefined;
+    base.providerID = info.providerID || undefined;
+    if (typeof info.cost === 'number') {
+      base.cost = info.cost;
+    }
+    if (info.tokens) {
+      base.tokens = {
+        input: info.tokens.input,
+        output: info.tokens.output,
+        reasoning: info.tokens.reasoning,
+        cacheRead: info.tokens.cache.read,
+        cacheWrite: info.tokens.cache.write,
+      };
+    }
+    base.finishReason = info.finish || undefined;
+    if (info.error) {
+      base.errorMessage = formatProviderError(info.error);
+    }
+    if (info.summary) {
+      base.summary = true;
+    }
+    return base;
+  });
+}
+
+function formatProviderError(error: NonNullable<
+  Extract<SessionMessagesResponse[number]['info'], { role: 'assistant' }>['error']
+>): string {
+  const data = error.data as { message?: string } | undefined;
+  if (data && typeof data.message === 'string' && data.message) {
+    return `${error.name}: ${data.message}`;
+  }
+  try {
+    return `${error.name}: ${JSON.stringify(data ?? {})}`;
+  } catch {
+    return error.name;
+  }
 }
 
 function isFilePart(part: PartData): part is FilePartData {
@@ -401,7 +450,7 @@ async function processImagesInMessages(
 function convertPart(raw: Part): PartData {
   switch (raw.type) {
     case 'text':
-      return { type: 'text', text: raw.text };
+      return { type: 'text', text: raw.text, synthetic: raw.synthetic || undefined };
     case 'tool':
       return {
         type: 'tool',

@@ -1,3 +1,4 @@
+import { INJECTED_CONTEXT_MARKER, TURN_SEPARATOR } from './types.js';
 import type {
   MessageData,
   PartData,
@@ -6,7 +7,21 @@ import type {
   FilePartData,
   ReasoningPartData,
   ChildSessionData,
+  SessionUsageStats,
 } from './types.js';
+
+/**
+ * 真实用户输入判定：user 消息中存在非 synthetic 内容 part
+ * （非 synthetic 文本，或文件等其他类型 part；step-start/step-finish 边界标记除外）。
+ * 仅由系统注入（synthetic-only）构成的消息不开新轮次，归入当前轮次。
+ */
+export function isRealUserInput(message: MessageData): boolean {
+  if (message.role !== 'user') return false;
+  return message.parts.some((part) => {
+    if (part.type === 'text' && 'text' in part) return !part.synthetic;
+    return part.type !== 'step-start' && part.type !== 'step-finish';
+  });
+}
 
 export function formatSession(
   _sessionId: string,
@@ -24,7 +39,17 @@ export function formatSession(
   lines.push('---');
   lines.push('');
 
+  const stats = computeSessionUsageStats(messages, childSessions);
+  if (stats) {
+    lines.push(formatUsageStatsSection(stats));
+    lines.push('');
+  }
+
   for (const message of messages) {
+    if (isRealUserInput(message)) {
+      lines.push(TURN_SEPARATOR);
+      lines.push('');
+    }
     lines.push(formatMessage(message));
     lines.push('');
   }
@@ -44,15 +69,167 @@ export function formatSession(
   return lines.join('\n');
 }
 
+/**
+ * Aggregate token/cost usage across a session's messages (main + child).
+ * Returns null when no message carries usage information.
+ */
+export function computeSessionUsageStats(
+  messages: MessageData[],
+  childSessions?: ChildSessionData[]
+): SessionUsageStats | null {
+  let stats: SessionUsageStats | null = null;
+
+  const addMessage = (message: MessageData): void => {
+    if (!message.tokens && typeof message.cost !== 'number') return;
+    if (!stats) {
+      stats = {
+        byModel: {},
+        totalCost: 0,
+        totalTokens: 0,
+        assistantMessages: 0,
+      };
+    }
+    const s = stats;
+    s.assistantMessages += 1;
+
+    const tokens = message.tokens;
+    const input = tokens?.input ?? 0;
+    const output = tokens?.output ?? 0;
+    const reasoning = tokens?.reasoning ?? 0;
+    const cacheRead = tokens?.cacheRead ?? 0;
+    const cacheWrite = tokens?.cacheWrite ?? 0;
+    const cost = typeof message.cost === 'number' ? message.cost : 0;
+
+    s.totalCost += cost;
+    s.totalTokens += input + output + reasoning;
+
+    const modelKey = message.modelID || 'unknown';
+    let row = s.byModel[modelKey];
+    if (!row) {
+      row = { calls: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+      s.byModel[modelKey] = row;
+    }
+    row.calls += 1;
+    row.input += input;
+    row.output += output;
+    row.reasoning += reasoning;
+    row.cacheRead += cacheRead;
+    row.cacheWrite += cacheWrite;
+    row.cost += cost;
+  };
+
+  for (const message of messages) {
+    addMessage(message);
+  }
+  for (const child of childSessions ?? []) {
+    for (const message of child.messages) {
+      addMessage(message);
+    }
+  }
+
+  return stats;
+}
+
+/**
+ * One-line machine-parseable usage metadata for an assistant message.
+ *
+ * Format (order fixed, keys omitted when value is zero/absent):
+ * `📊 provider=anthropic model=claude-x in=1 out=2 reason=3 cacheread=4 cachewrite=5 cost=$0.1 dur=1.5s finish=stop compaction error="..."`
+ */
+export function formatAssistantMeta(message: MessageData): string {
+  if (!message.tokens && typeof message.cost !== 'number') {
+    return '';
+  }
+
+  const parts: string[] = ['📊'];
+  if (message.providerID) parts.push(`provider=${message.providerID}`);
+  if (message.modelID) parts.push(`model=${message.modelID}`);
+
+  const tokens = message.tokens;
+  if (tokens) {
+    parts.push(`in=${tokens.input}`, `out=${tokens.output}`);
+    if (tokens.reasoning > 0) parts.push(`reason=${tokens.reasoning}`);
+    if (tokens.cacheRead > 0) parts.push(`cacheread=${tokens.cacheRead}`);
+    if (tokens.cacheWrite > 0) parts.push(`cachewrite=${tokens.cacheWrite}`);
+  }
+  if (typeof message.cost === 'number') {
+    parts.push(`cost=$${message.cost.toFixed(4)}`);
+  }
+  if (typeof message.durationMs === 'number' && message.durationMs > 0) {
+    parts.push(`dur=${(message.durationMs / 1000).toFixed(1)}s`);
+  }
+  if (message.finishReason) parts.push(`finish=${message.finishReason}`);
+  if (message.summary) parts.push('compaction');
+  if (message.errorMessage) parts.push(`error="${message.errorMessage.replace(/"/g, "'")}"`);
+
+  return parts.join(' ');
+}
+
+/** Human-readable warning block appended after the meta line on abnormal finish. */
+function formatFinishWarning(message: MessageData): string {
+  if (message.errorMessage) {
+    return `> ❌ **请求失败 / Request failed**: ${message.errorMessage}`;
+  }
+  const finish = message.finishReason?.toLowerCase() ?? '';
+  if (finish.includes('max') || finish.includes('length')) {
+    return `> ⚠️ **输出被截断 / Output truncated** (finish=${message.finishReason})`;
+  }
+  if (finish.includes('abort') || finish.includes('cancel') || finish.includes('interrupt')) {
+    return `> 🛑 **输出被中断 / Output interrupted** (finish=${message.finishReason})`;
+  }
+  return '';
+}
+
+/** Markdown statistics table for the whole session (main + child sessions). */
+export function formatUsageStatsSection(stats: SessionUsageStats): string {
+  const lines: string[] = [];
+
+  lines.push('## 📊 Usage / 用量统计');
+  lines.push('');
+  lines.push('| Model | Calls | Input | Output | Reasoning | Cache Read | Cache Write | Cost ($) |');
+  lines.push('|---|---|---|---|---|---|---|---|');
+
+  for (const [model, row] of Object.entries(stats.byModel)) {
+    lines.push(
+      `| ${model} | ${row.calls} | ${row.input} | ${row.output} | ${row.reasoning} | ${row.cacheRead} | ${row.cacheWrite} | ${row.cost.toFixed(4)} |`
+    );
+  }
+  lines.push(
+    `| **Total** | ${stats.assistantMessages} | - | - | - | - | - | ${stats.totalCost.toFixed(4)} |`
+  );
+
+  lines.push('');
+  lines.push(`Total tokens: ${stats.totalTokens.toLocaleString('en-US')} (input + output + reasoning)`);
+
+  return lines.join('\n');
+}
+
 export function formatMessage(message: MessageData): string {
   const lines: string[] = [];
   const roleEmoji = message.role === 'user' ? '👤' : '🤖';
   const roleLabel = message.role === 'user' ? 'User' : 'Assistant';
   const headingLevel = message.role === 'user' ? '##' : '###';
 
-  const tag = message.role === 'assistant' ? ` ${getAssistantTag(message.parts)}` : '';
-  lines.push(`${headingLevel} ${roleEmoji} ${roleLabel}${tag}`);
+  const tags: string[] = [];
+  const assistantTag = message.role === 'assistant' ? getAssistantTag(message.parts) : '';
+  if (assistantTag) tags.push(assistantTag);
+  if (message.summary) tags.push('📦 Compaction Summary / 压缩摘要');
+
+  lines.push(`${headingLevel} ${roleEmoji} ${roleLabel}${tags.length > 0 ? ` ${tags.join(' · ')}` : ''}`);
   lines.push(`*${formatTimestamp(new Date(message.createdAt))}*`);
+
+  if (message.role === 'assistant') {
+    const meta = formatAssistantMeta(message);
+    if (meta) {
+      lines.push('');
+      lines.push(meta);
+      const warning = formatFinishWarning(message);
+      if (warning) {
+        lines.push('');
+        lines.push(warning);
+      }
+    }
+  }
   lines.push('');
 
   for (const part of message.parts) {
@@ -87,6 +264,9 @@ export function formatPart(part: PartData): string {
 }
 
 export function formatTextPart(part: TextPartData): string {
+  if (part.synthetic) {
+    return [INJECTED_CONTEXT_MARKER, '', part.text].join('\n');
+  }
   return part.text;
 }
 
@@ -176,9 +356,22 @@ export function formatChildSession(child: ChildSessionData): string {
     const roleEmoji = message.role === 'user' ? '👤' : '🤖';
     const roleLabel = message.role === 'user' ? 'User' : 'Assistant';
 
-    lines.push(`#### ${roleEmoji} ${roleLabel}`);
-    lines.push(`*${formatTimestamp(new Date(message.createdAt))}*`);
-    lines.push('');
+  lines.push(`#### ${roleEmoji} ${roleLabel}`);
+  lines.push(`*${formatTimestamp(new Date(message.createdAt))}*`);
+
+  if (message.role === 'assistant') {
+    const meta = formatAssistantMeta(message);
+    if (meta) {
+      lines.push('');
+      lines.push(meta);
+      const warning = formatFinishWarning(message);
+      if (warning) {
+        lines.push('');
+        lines.push(warning);
+      }
+    }
+  }
+  lines.push('');
 
     for (const part of message.parts) {
       const formattedPart = formatPart(part);
