@@ -263,6 +263,11 @@ const ASSISTANT_HEADING_RE = /^### 🤖 Assistant/;
  *  兼容 formatter 的多标签拼接（` · 📦 Compaction Summary / 压缩摘要`），只取首个 */
 const ASSISTANT_TAG_CAPTURE_RE = /^### 🤖 Assistant\s+\[([^\]]+?)\]/;
 const REASONING_HEADER_PREFIX = '💭 **Reasoning:**';
+/** formatter 写出的步骤标记均为独占一行的裸标记；必须整行匹配，
+ *  否则会误命中引用源码中的子串（如 `includes('[step-end')` 的代码行） */
+const STEP_START_LINE_RE = /^\[step-start\]$/;
+const STEP_END_LINE_RE = /^\[step-end\]$/;
+const STEP_FINISH_LINE_RE = /^\[step-finish\]$/;
 // 步骤组 id 计数器：同一条 ### 🤖 Assistant 消息内的全部 block 共享同一 stepId
 let assistantStepIdCounter = 0;
 
@@ -457,13 +462,35 @@ export function parseBlockConversation(blockContent: string): ConversationBlock[
       let toolBlock: ConversationBlock | null = null;
       let inStepBlock = false;
       let stepLines: string[] = [];
+      // 代码围栏状态：围栏内是引用的源码/输出原文，其中的字面量标记行与标题行
+      // 不构成任何结构边界（工具块的围栏由下方 Input/Output 提取逻辑自行消费）
+      let inFence = false;
 
       while (i < lines.length) {
         const currentLine = lines[i];
 
-        // 精确边界锚定（不用裸 --- ：工具输出/正文中可能出现分隔线）
-        if (isConversationBoundary(currentLine)) {
+        if (!inToolBlock && currentLine.trimStart().startsWith('```')) {
+          inFence = !inFence;
+        }
+
+        // 精确边界锚定（不用裸 --- ：工具输出/正文中可能出现分隔线）；围栏内不判界
+        if (!inFence && isConversationBoundary(currentLine)) {
           break;
+        }
+
+        // 围栏内：纯内容收集，跳过全部结构判定
+        if (inFence && !inToolBlock) {
+          if (inStepBlock) {
+            if (currentLine.trim() || stepLines.length > 0) {
+              stepLines.push(currentLine);
+            }
+          } else {
+            if (currentLine.trim() || messageLines.length > 0) {
+              messageLines.push(currentLine);
+            }
+          }
+          i += 1;
+          continue;
         }
 
         // Usage metadata line (📊 key=value ...), not part of the visible content
@@ -476,8 +503,8 @@ export function parseBlockConversation(blockContent: string): ConversationBlock[
           }
         }
 
-        // Check for tool block start
-        const toolMatch = currentLine.match(/#### 🔧 Tool:\s*(\w+)/);
+        // Check for tool block start（锚定行首：引用正文中出现同款文本不算工具块）
+        const toolMatch = currentLine.match(/^#### 🔧 Tool:\s*(\w+)/);
         if (toolMatch) {
           // Save previous message content if any
           if (messageLines.length > 0 && !inToolBlock && !inStepBlock) {
@@ -502,7 +529,7 @@ export function parseBlockConversation(blockContent: string): ConversationBlock[
         }
 
         // Check for step finish: ends tool block and/or step block
-        if (currentLine.includes('[step-finish')) {
+        if (STEP_FINISH_LINE_RE.test(currentLine)) {
           // Close step block first if still open (old-format files interleave
           // reasoning and tools inside one [step-start]…[step-finish] range;
           // saving step content first keeps block order aligned with the source)
@@ -525,8 +552,17 @@ export function parseBlockConversation(blockContent: string): ConversationBlock[
           continue;
         }
 
-        // Check for step block start: [step-start part]
-        if (currentLine.includes('[step-start')) {
+        // Check for step block start: [step-start]
+        if (STEP_START_LINE_RE.test(currentLine)) {
+          // 连续两个 [step-start]（历史脏数据）：先落盘已积累的步骤内容再开新块，
+          // 避免两段 reasoning 被合并进同一块
+          if (inStepBlock) {
+            const prevStep = stepLines.join('\n').trim();
+            if (prevStep) {
+              pushAssistantText(prevStep);
+            }
+          }
+
           // Save previous message content as question if any
           if (messageLines.length > 0 && !inToolBlock && !inStepBlock) {
             const msgContent = messageLines.join('\n').trim();
@@ -542,15 +578,19 @@ export function parseBlockConversation(blockContent: string): ConversationBlock[
           continue;
         }
 
-        // Check for step block end: [step-end part]
-        if (inStepBlock && currentLine.includes('[step-end')) {
+        // Check for step block end: [step-end]
+        if (STEP_END_LINE_RE.test(currentLine)) {
           // Save step block as assistant answer
-          const stepContent = stepLines.join('\n').trim();
-          if (stepContent) {
-            pushAssistantText(stepContent);
+          if (inStepBlock) {
+            const stepContent = stepLines.join('\n').trim();
+            if (stepContent) {
+              pushAssistantText(stepContent);
+            }
+            inStepBlock = false;
+            stepLines = [];
           }
-          inStepBlock = false;
-          stepLines = [];
+          // 状态机外的孤儿 [step-end]（历史脏数据）直接丢弃，
+          // 不落入正文形成"[step-end]"垃圾卡片
           i += 1;
           continue;
         }
@@ -2264,7 +2304,7 @@ async function ensureProjectDetail(
  * 视图渲染结构版本。HTML 渲染逻辑发生结构性变化（如轮次手风琴分组）时 +1，
  * regenerateViews 检测到不一致会强制重建全部项目页（存量页面刷新）。
  */
-const VIEW_VERSION = 2;
+const VIEW_VERSION = 3;
 
 export async function regenerateViews(globalSaveDir: string): Promise<void> {
   const baseDir = globalSaveDir;
@@ -2276,6 +2316,17 @@ export async function regenerateViews(globalSaveDir: string): Promise<void> {
     let projects: ProjectData[];
     let isIncremental = false;
     let unchangedProjects: string[] = [];
+
+    // 解析逻辑升级（VIEW_VERSION 变更）时必须丢弃缓存的解析结果：
+    // 将缓存 mtime 置为失效值，使增量扫描把所有文件视为已修改并重新解析，
+    // 否则旧代码写入的 sessionInfo（含错误解析的对话块）会被直接复用
+    if (index.primary.viewVersion !== VIEW_VERSION) {
+      for (const secondary of index.secondary.values()) {
+        for (const entry of Object.values(secondary.files)) {
+          entry.mtime = -1;
+        }
+      }
+    }
 
     if (index.primary.lastFullScan > 0 && Object.keys(index.primary.projects).length > 0) {
       // Use incremental scanning with index
