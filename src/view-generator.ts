@@ -1,5 +1,6 @@
-import { readdir, readFile, writeFile, appendFile, stat, mkdir, rename, rm } from 'node:fs/promises';
+import { readdir, readFile, writeFile, appendFile, stat, mkdir, rename, rm, unlink } from 'node:fs/promises';
 import { join, basename } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { version: pluginVersion } = require('../package.json');
@@ -1286,6 +1287,18 @@ const DETAIL_CSS = `
     .session-stats-bar.hidden { display: none; }
     .stats-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: var(--apple-gray-5); background: var(--apple-gray-1); border: 1px solid var(--apple-gray-2); padding: 3px 10px; border-radius: 9999px; white-space: nowrap; }
     .stats-chip.cost { color: #FF9500; background: rgba(255,149,0,0.10); border-color: rgba(255,149,0,0.2); }
+    .usage-stats-table-wrap { width: 100%; max-width: 100%; overflow-x: auto; margin-top: 12px; }
+    .usage-stats-table { border-collapse: collapse; font-size: 12px; line-height: 1.5; white-space: nowrap; }
+    .usage-stats-table th { font-weight: 600; color: var(--apple-gray-5); background: var(--apple-gray-1); padding: 5px 12px; text-align: right; border-bottom: 1px solid var(--apple-gray-2); white-space: nowrap; }
+    .usage-stats-table th:first-child { text-align: left; border-radius: 8px 0 0 0; }
+    .usage-stats-table th:last-child { border-radius: 0 8px 0 0; }
+    .usage-stats-table td { padding: 5px 12px; color: var(--apple-black); text-align: right; border-bottom: 1px solid var(--apple-gray-2); font-variant-numeric: tabular-nums; }
+    .usage-stats-table td:first-child { text-align: left; color: var(--apple-gray-5); font-weight: 500; }
+    .usage-stats-table tr.total td { font-weight: 600; border-top: 2px solid var(--apple-gray-3); border-bottom: none; background: rgba(142,142,147,0.06); }
+    .usage-stats-table tr.total td:first-child { color: var(--apple-black); border-radius: 0 0 0 8px; }
+    .usage-stats-table tr.total td:last-child { border-radius: 0 0 8px 0; }
+    .usage-stats-table tr.total td:not(:first-child):not(:last-child) { color: var(--apple-gray-4); font-weight: 400; }
+    .usage-tokens-note { margin-top: 6px; font-size: 11px; color: var(--apple-gray-4); }
     .usage-badge { display: inline-flex; align-items: center; gap: 6px; margin-left: 10px; font-size: 11px; font-weight: 500; color: var(--apple-gray-5); background: rgba(142,142,147,0.10); border: 1px solid rgba(142,142,147,0.18); padding: 2px 9px; border-radius: 9999px; white-space: nowrap; flex-shrink: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; max-width: 50%; box-sizing: border-box; }
     .usage-badge.warn { color: #FF9500; background: rgba(255,149,0,0.10); border-color: rgba(255,149,0,0.25); }
     .usage-badge.error { color: #FF3B30; background: rgba(255,59,48,0.10); border-color: rgba(255,59,48,0.25); }
@@ -1770,20 +1783,37 @@ export function buildProjectHtml(project: ProjectData): string {
     function renderSessionStatsBar(stats) {
       const bar = document.getElementById('sessionDetailModalStats');
       if (!bar) return;
-      if (stats && (stats.totalCost > 0 || stats.totalTokens > 0)) {
-        const chips = [
-          '<span class="stats-chip cost">💰 $' + Number(stats.totalCost).toFixed(4) + '</span>',
-          '<span class="stats-chip">🪙 ' + fmtNum(stats.totalTokens) + ' tokens</span>'
-        ];
-        Object.entries(stats.byModel || {}).forEach(([model, row]) => {
-          chips.push('<span class="stats-chip">' + escapeHtml(model) + ' × ' + (row.calls || 0) + '</span>');
-        });
-        bar.innerHTML = chips.join('');
-        bar.classList.remove('hidden');
-      } else {
+      const models = Object.entries((stats && stats.byModel) || {});
+      if (!stats || (models.length === 0 && !(stats.totalCost > 0))) {
         bar.innerHTML = '';
         bar.classList.add('hidden');
+        return;
       }
+
+      let callsTotal = 0;
+      const rows = models.map(([model, r]) => {
+        callsTotal += r.calls || 0;
+        return '<tr>'
+          + '<td>' + escapeHtml(model) + '</td>'
+          + '<td>' + fmtNum(r.calls) + '</td>'
+          + '<td>' + fmtNum(r.input) + '</td>'
+          + '<td>' + fmtNum(r.output) + '</td>'
+          + '<td>' + fmtNum(r.reasoning) + '</td>'
+          + '<td>' + fmtNum(r.cacheRead) + '</td>'
+          + '<td>' + fmtNum(r.cacheWrite) + '</td>'
+          + '<td>' + Number(r.cost || 0).toFixed(4) + '</td>'
+          + '</tr>';
+      });
+
+      let html = '<div class="usage-stats-table-wrap"><table class="usage-stats-table">';
+      html += '<thead><tr><th>模型</th><th>调用</th><th>输入</th><th>输出</th><th>推理</th><th>缓存读取</th><th>缓存写入</th><th>成本 ($)</th></tr></thead>';
+      html += '<tbody>' + rows.join('') + '</tbody>';
+      html += '<tfoot><tr class="total"><td>Total</td><td>' + fmtNum(callsTotal) + '</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>' + Number(stats.totalCost || 0).toFixed(4) + '</td></tr></tfoot>';
+      html += '</table></div>';
+      html += '<div class="usage-tokens-note">🪙 Total tokens: ' + fmtNum(stats.totalTokens) + ' (输入 + 输出 + 推理)</div>';
+
+      bar.innerHTML = html;
+      bar.classList.remove('hidden');
     }
 
     function formatUsageBadge(u) {
@@ -1792,6 +1822,8 @@ export function buildProjectHtml(project: ProjectData): string {
       if (u.modelID) bits.push(u.modelID);
       const inTok = u.input || 0, outTok = u.output || 0;
       if (inTok || outTok) bits.push('↑' + fmtNum(inTok) + ' ↓' + fmtNum(outTok));
+      if (u.reasoning) bits.push('🧠' + fmtNum(u.reasoning));
+      if (u.cacheRead || u.cacheWrite) bits.push('⚡' + fmtNum((u.cacheRead || 0) + (u.cacheWrite || 0)));
       if (u.cost) bits.push('$' + Number(u.cost).toFixed(4));
       if (u.durationMs) bits.push((u.durationMs / 1000).toFixed(1) + 's');
 
@@ -1802,7 +1834,21 @@ export function buildProjectHtml(project: ProjectData): string {
       else if (u.finish && /abort|cancel|interrupt/i.test(u.finish)) { cls += ' warn'; prefix = '🛑 '; }
       if (u.compaction) { cls += ' compaction'; prefix += '📦 '; }
 
-      return '<span class="' + cls + '">' + prefix + escapeHtml(bits.join(' · ')) + '</span>';
+      const full = [];
+      if (u.providerID) full.push('provider=' + u.providerID);
+      if (u.modelID) full.push('model=' + u.modelID);
+      full.push('in=' + fmtNum(u.input), 'out=' + fmtNum(u.output));
+      if (u.reasoning) full.push('reason=' + fmtNum(u.reasoning));
+      if (u.cacheRead) full.push('cacheread=' + fmtNum(u.cacheRead));
+      if (u.cacheWrite) full.push('cachewrite=' + fmtNum(u.cacheWrite));
+      if (typeof u.cost === 'number') full.push('cost=$' + Number(u.cost).toFixed(4));
+      if (u.durationMs) full.push('dur=' + (u.durationMs / 1000).toFixed(1) + 's');
+      if (u.finish) full.push('finish=' + u.finish);
+      if (u.compaction) full.push('compaction');
+      if (u.error) full.push('error="' + u.error + '"');
+      const titleAttr = ' title="' + escapeHtml(full.join('\\n')).replace(/"/g, '&quot;') + '"';
+
+      return '<span class="' + cls + '"' + titleAttr + '>' + prefix + escapeHtml(bits.join(' · ')) + '</span>';
     }
 
     function openSessionDetailModal(filename) {
@@ -2208,9 +2254,17 @@ export function buildProjectHtml(project: ProjectData): string {
 // ─── 写入与增量辅助 ──────────────────────────────────────────────────────────
 
 async function writeHtmlAtomically(filePath: string, content: string): Promise<void> {
-  const tmpPath = `${filePath}.tmp`;
-  await writeFile(tmpPath, content, 'utf-8');
-  await rename(tmpPath, filePath);
+  // 唯一临时名：CLI 与运行中的插件可能并发再生同一页面，
+  // 固定 .tmp 名会互相截断（rename 发布半成品导致 HTML 损坏）；
+  // 各写各的 tmp + 原子 rename，最终发布的始终是某个进程的完整产物
+  const tmpPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(tmpPath, content, 'utf-8');
+    await rename(tmpPath, filePath);
+  } catch (error) {
+    await unlink(tmpPath).catch(() => {});
+    throw error;
+  }
 }
 
 // 检查哪些项目的索引缓存缺少完整对话（需要全量重读）
@@ -2304,7 +2358,7 @@ async function ensureProjectDetail(
  * 视图渲染结构版本。HTML 渲染逻辑发生结构性变化（如轮次手风琴分组）时 +1，
  * regenerateViews 检测到不一致会强制重建全部项目页（存量页面刷新）。
  */
-const VIEW_VERSION = 3;
+const VIEW_VERSION = 4;
 
 export async function regenerateViews(globalSaveDir: string): Promise<void> {
   const baseDir = globalSaveDir;
