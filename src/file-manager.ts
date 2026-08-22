@@ -172,6 +172,10 @@ export async function saveSessionToTopicFile(
 
       const newContent = buildTopicFile(topic, blocks);
 
+      if (newContent === existingContent) {
+        return true;
+      }
+
       const tempPath = `${filePath}.tmp`;
       try {
         await writeFile(tempPath, newContent, 'utf-8');

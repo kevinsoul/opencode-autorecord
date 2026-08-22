@@ -10,6 +10,7 @@ import {
   removeFileFromIndex,
   getFilesToProcess,
   convertIndexToProjects,
+  latestSessionTimeMs,
   validateAndRepairIndexes,
   PROJECTS_DIR,
   type AutorecordIndex,
@@ -774,7 +775,7 @@ async function scanProjectsFull(baseDir: string): Promise<ProjectData[]> {
     if (mdFiles.length === 0) continue;
 
     const sessions: SessionInfo[] = [];
-    let lastModified = 0;
+    let fallbackMtime = 0;
 
     for (const filePath of mdFiles) {
       try {
@@ -784,7 +785,7 @@ async function scanProjectsFull(baseDir: string): Promise<ProjectData[]> {
           sessions.push(info);
         }
         const s = await stat(filePath);
-        if (s.mtimeMs > lastModified) lastModified = s.mtimeMs;
+        if (s.mtimeMs > fallbackMtime) fallbackMtime = s.mtimeMs;
       } catch {
         // Skip unreadable files
       }
@@ -800,7 +801,7 @@ async function scanProjectsFull(baseDir: string): Promise<ProjectData[]> {
         name: project.name,
         sessions,
         count: sessions.length,
-        lastModified,
+        lastModified: latestSessionTimeMs(sessions) ?? fallbackMtime,
       });
     }
   }
@@ -1227,7 +1228,7 @@ function buildProjectCards(projects: ProjectData[]): string {
             </div>
             <div class="project-info">
               <h2>${escapeHtml(p.name)}</h2>
-              <span class="last-modified">最后更新: ${lastMod}</span>
+              <span class="last-modified">最后对话: ${lastMod}</span>
             </div>
           </div>
           <div class="project-meta">
@@ -1590,7 +1591,7 @@ function buildProjectHtml(project: ProjectData): string {
         <div class="project-hero-meta">
           <span>${sessions.length} 个会话</span>
           <span>时间跨度: ${timeRangeText}</span>
-          <span>最后更新: ${lastMod}</span>
+          <span>最后对话: ${lastMod}</span>
         </div>
       </div>
     </div>
@@ -2064,7 +2065,6 @@ async function ensureProjectDetail(
   const projectDir = join(baseDir, project.name);
   const mdFiles = await listMdFiles(projectDir);
   const sessions: SessionInfo[] = [];
-  let lastModified = project.lastModified;
 
   for (const filePath of mdFiles) {
     try {
@@ -2073,7 +2073,6 @@ async function ensureProjectDetail(
       if (info) {
         sessions.push(info);
         const s = await stat(filePath);
-        if (s.mtimeMs > lastModified) lastModified = s.mtimeMs;
         updateFileIndex(index, project.name, filePath, { mtime: s.mtime, size: s.size }, info);
       }
     } catch {
@@ -2082,7 +2081,13 @@ async function ensureProjectDetail(
   }
 
   sessions.sort((a, b) => parseDate(b.date).getTime() - parseDate(a.date).getTime());
-  return { name: project.name, sessions, count: sessions.length, lastModified };
+  return {
+    name: project.name,
+    sessions,
+    count: sessions.length,
+    lastModified:
+      (sessions.length > 0 ? latestSessionTimeMs(sessions) : null) ?? project.lastModified,
+  };
 }
 
 

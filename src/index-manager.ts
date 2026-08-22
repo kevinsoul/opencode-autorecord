@@ -555,7 +555,7 @@ export function convertIndexToProjects(index: UnifiedIndex): ProjectData[] {
         name: projectName,
         sessions,
         count: sessions.length,
-        lastModified: secondary.lastModified,
+        lastModified: latestSessionTimeMs(sessions) ?? secondary.lastModified,
       });
     }
   }
@@ -564,6 +564,18 @@ export function convertIndexToProjects(index: UnifiedIndex): ProjectData[] {
   projects.sort((a, b) => b.lastModified - a.lastModified);
 
   return projects;
+}
+
+export function latestSessionTimeMs(sessions: SessionInfo[]): number | null {
+  let latest: number | null = null;
+  for (const s of sessions) {
+    const d = new Date(s.date);
+    if (isNaN(d.getTime())) continue;
+    if (latest === null || d.getTime() > latest) {
+      latest = d.getTime();
+    }
+  }
+  return latest;
 }
 
 function parseDate(dateStr: string): Date {
