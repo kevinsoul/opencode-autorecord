@@ -1172,15 +1172,15 @@ const COMMON_CSS = `
     .global-timeline .timeline-item:last-child { padding-bottom: 0; }
     .global-timeline .timeline-serial { width: 32px; height: 32px; border-radius: 50%; border: 2px solid var(--apple-blue); background: var(--apple-white); display: flex; align-items: center; justify-content: center; font-family: var(--font-display); font-size: 17px; font-weight: 600; color: var(--apple-blue); flex-shrink: 0; margin: 16px 16px 0 0; }
     .global-timeline .timeline-item.recent .timeline-serial { background: var(--apple-blue); color: var(--apple-white); box-shadow: 0 0 0 3px var(--apple-gray-1), 0 0 0 5px rgba(0,122,255,0.2); }
-    .global-timeline .timeline-content { flex: 1; margin-left: 16px; background: var(--apple-white); border-radius: 16px; padding: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); border: 1px solid var(--apple-gray-2); transition: all 0.3s cubic-bezier(0.4,0,0.2,1); position: relative; }
+    .global-timeline .timeline-content { flex: 1; min-width: 0; margin-left: 16px; background: var(--apple-white); border-radius: 16px; padding: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); border: 1px solid var(--apple-gray-2); transition: all 0.3s cubic-bezier(0.4,0,0.2,1); position: relative; }
     .global-timeline .timeline-content:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.08); transform: translateX(4px); }
     .global-timeline .timeline-meta-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
     .global-timeline .timeline-project { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--apple-black); background: var(--apple-gray-1); padding: 6px 12px; border-radius: 9999px; }
     .global-timeline .timeline-project-icon { width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; border-radius: 6px; }
     .global-timeline .timeline-date { font-size: 13px; color: var(--apple-gray-4); display: flex; align-items: center; gap: 6px; }
     .global-timeline .timeline-date::before { content: ''; width: 4px; height: 4px; background: var(--apple-gray-3); border-radius: 50%; }
-    .global-timeline .timeline-title { font-family: var(--font-display); font-size: 17px; font-weight: 600; line-height: 1.4; letter-spacing: -0.016em; margin-bottom: 12px; color: var(--apple-black); }
-    .global-timeline .timeline-request { font-size: 14px; color: var(--apple-gray-5); line-height: 1.5; padding-top: 12px; border-top: 1px solid var(--apple-gray-2); }
+    .global-timeline .timeline-title { font-family: var(--font-display); font-size: 17px; font-weight: 600; line-height: 1.4; letter-spacing: -0.016em; margin-bottom: 12px; color: var(--apple-black); overflow-wrap: anywhere; word-break: break-word; }
+    .global-timeline .timeline-request { font-size: 14px; color: var(--apple-gray-5); line-height: 1.5; padding-top: 12px; border-top: 1px solid var(--apple-gray-2); overflow-wrap: anywhere; word-break: break-word; }
     .global-timeline .timeline-category { display: inline-block; padding: 3px 10px; border-radius: 9999px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: -0.01em; position: absolute; top: 24px; right: 24px; }
     .project-hero {
       display: flex; align-items: center; gap: 20px;
