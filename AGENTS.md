@@ -37,6 +37,7 @@ npm run typecheck # tsc --noEmit（严格模式）
   - 视图再生 debounce: 10000ms（仅主会话触发，子会话不触发）
 - **图片处理**：base64 图片自动提取保存为独立文件，替换为本地路径
 - **双级 HTML 视图**：主索引页 `opencode-overview.html` 仅含元数据（避免文件无限膨胀），完整对话在 `projects/<项目名>.html` 中，会话详情弹窗 + 深色代码块（语言标签/复制按钮）
+- **双主题**：视图默认暗色（`data-theme="dark"`，暖黑 + 柠檬黄 opencode 风格），导航栏按钮可切换浅色并持久化到 `localStorage['autorecord-theme']`；颜色集中在 CSS 变量（改主题只需改变量块）
 - **原子写入**：HTML 通过 `.tmp` 临时文件 + `rename` 原子替换；`projects/` 目录从项目扫描中排除（`PROJECTS_DIR`）
 - **残留清理**：每次视图再生成时对比 `projects/` 下的 `.html` 文件与当前项目列表，删除已不存在的项目对应页面（`cleanupStaleProjectPages`）
 
