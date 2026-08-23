@@ -19,7 +19,8 @@ export interface BlockUsage {
 }
 
 export interface ConversationBlock {
-  type: 'message' | 'tool';
+  /** child-session：subagent 子会话容器块（formatter 的 `### 📦 Subagent:` 段落） */
+  type: 'message' | 'tool' | 'child-session';
   timestamp: string;
   content?: string;
   /** 消息角色（message 块）；旧索引缓存无此字段，渲染端按序推断 */
@@ -38,6 +39,12 @@ export interface ConversationBlock {
   toolOutput?: string;
   /** Assistant message usage metadata (message blocks only) */
   usage?: BlockUsage;
+  /** 子会话标题（type='child-session' 时存在，来自 `### 📦 Subagent: <title>`） */
+  childTitle?: string;
+  /** 子会话开始时间（formatter 写入的 `*Started: …*` 行） */
+  childTimestamp?: string;
+  /** 子会话内部消息流（user/assistant 块，复用主对话 block 结构；子会话无轮次概念） */
+  children?: ConversationBlock[];
 }
 
 export interface SessionUsageRow {

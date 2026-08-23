@@ -413,10 +413,394 @@ function isSyntheticOnlyUserBody(bodyLines: string[]): boolean {
 }
 
 /**
+ * 解析一条 Assistant 消息体（自标题行起），产出共享同一 stepId 的 message/tool 块序列。
+ * stepId/stepTag/kind/usage 在此确定；role/turn 归属由调用方决定（主对话挂当前轮次，
+ * 子会话内的消息不挂轮次）。extraBoundaryRe 为额外终止边界（子会话场景用于停在
+ * `#### 👤 User` / `#### 🤖 Assistant` 消息标题）；围栏内不判界，与主边界一致。
+ */
+function collectAssistantSection(
+  lines: string[],
+  headingLineIndex: number,
+  extraBoundaryRe?: RegExp,
+): { blocks: ConversationBlock[]; nextIndex: number } {
+  const headingLine = lines[headingLineIndex];
+  let timestamp = '';
+  let i = headingLineIndex + 1;
+  if (i < lines.length) {
+    const timeMatch = lines[i].match(/\*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\*/);
+    if (timeMatch) {
+      timestamp = timeMatch[1];
+      i += 1;
+    }
+  }
+
+  // 步骤组：标题后缀标签优先，缺省时 section 结束后按内容推导
+  const headingStepTag = parseAssistantStepTag(headingLine);
+  const stepId = ++assistantStepIdCounter;
+
+  const blocks: ConversationBlock[] = [];
+
+  /** 按拆分结果 push assistant 文本块（reasoning/reply 共享同一 stepId） */
+  const pushAssistantText = (rawContent: string): void => {
+    for (const seg of splitAssistantMessageBlock(rawContent)) {
+      blocks.push({ type: 'message', stepId, timestamp, content: seg.content, kind: seg.kind });
+    }
+  };
+
+  let sectionMeta: BlockUsage | null = null;
+  const messageLines: string[] = [];
+  let inToolBlock = false;
+  let toolBlock: ConversationBlock | null = null;
+  let inStepBlock = false;
+  let stepLines: string[] = [];
+  // 代码围栏状态：围栏内是引用的源码/输出原文，其中的字面量标记行与标题行
+  // 不构成任何结构边界（工具块的围栏由下方 Input/Output 提取逻辑自行消费）
+  let inFence = false;
+
+  while (i < lines.length) {
+    const currentLine = lines[i];
+
+    if (!inToolBlock && currentLine.trimStart().startsWith('```')) {
+      inFence = !inFence;
+    }
+
+    // 精确边界锚定（不用裸 --- ：工具输出/正文中可能出现分隔线）；围栏内不判界
+    if (!inFence && isConversationBoundary(currentLine)) {
+      break;
+    }
+    if (!inFence && extraBoundaryRe?.test(currentLine)) {
+      break;
+    }
+
+    // 围栏内：纯内容收集，跳过全部结构判定
+    if (inFence && !inToolBlock) {
+      if (inStepBlock) {
+        if (currentLine.trim() || stepLines.length > 0) {
+          stepLines.push(currentLine);
+        }
+      } else {
+        if (currentLine.trim() || messageLines.length > 0) {
+          messageLines.push(currentLine);
+        }
+      }
+      i += 1;
+      continue;
+    }
+
+    // Usage metadata line (📊 key=value ...), not part of the visible content
+    if (!inToolBlock && !inStepBlock && currentLine.startsWith('📊')) {
+      const parsed = parseAssistantMetaLine(currentLine);
+      if (parsed) {
+        sectionMeta = parsed;
+        i += 1;
+        continue;
+      }
+    }
+
+    // Check for tool block start（锚定行首：引用正文中出现同款文本不算工具块）
+    const toolMatch = currentLine.match(/^#### 🔧 Tool:\s*(\w+)/);
+    if (toolMatch) {
+      // Save previous message content if any
+      if (messageLines.length > 0 && !inToolBlock && !inStepBlock) {
+        const msgContent = messageLines.join('\n').trim();
+        if (msgContent) {
+          pushAssistantText(msgContent);
+        }
+        messageLines.length = 0;
+      }
+
+      inToolBlock = true;
+      toolBlock = {
+        type: 'tool',
+        timestamp,
+        toolName: toolMatch[1],
+        toolStatus: '',
+        toolInput: '',
+        toolOutput: '',
+      };
+      i += 1;
+      continue;
+    }
+
+    // Check for step finish: ends tool block and/or step block
+    if (STEP_FINISH_LINE_RE.test(currentLine)) {
+      // Close step block first if still open (old-format files interleave
+      // reasoning and tools inside one [step-start]…[step-finish] range;
+      // saving step content first keeps block order aligned with the source)
+      if (inStepBlock) {
+        const stepContent = stepLines.join('\n').trim();
+        if (stepContent) {
+          pushAssistantText(stepContent);
+        }
+        inStepBlock = false;
+        stepLines = [];
+      }
+
+      // Save tool block
+      if (toolBlock) {
+        blocks.push(toolBlock);
+      }
+      inToolBlock = false;
+      toolBlock = null;
+      i += 1;
+      continue;
+    }
+
+    // Check for step block start: [step-start]
+    if (STEP_START_LINE_RE.test(currentLine)) {
+      // 连续两个 [step-start]（历史脏数据）：先落盘已积累的步骤内容再开新块，
+      // 避免两段 reasoning 被合并进同一块
+      if (inStepBlock) {
+        const prevStep = stepLines.join('\n').trim();
+        if (prevStep) {
+          pushAssistantText(prevStep);
+        }
+      }
+
+      // Save previous message content as question if any
+      if (messageLines.length > 0 && !inToolBlock && !inStepBlock) {
+        const msgContent = messageLines.join('\n').trim();
+        if (msgContent) {
+          pushAssistantText(msgContent);
+        }
+        messageLines.length = 0;
+      }
+
+      inStepBlock = true;
+      stepLines = [];
+      i += 1;
+      continue;
+    }
+
+    // Check for step block end: [step-end]
+    if (STEP_END_LINE_RE.test(currentLine)) {
+      // Save step block as assistant answer
+      if (inStepBlock) {
+        const stepContent = stepLines.join('\n').trim();
+        if (stepContent) {
+          pushAssistantText(stepContent);
+        }
+        inStepBlock = false;
+        stepLines = [];
+      }
+      // 状态机外的孤儿 [step-end]（历史脏数据）直接丢弃，
+      // 不落入正文形成"[step-end]"垃圾卡片
+      i += 1;
+      continue;
+    }
+
+    // Collect content
+    if (inToolBlock) {
+      // Extract status
+      const statusMatch = currentLine.match(/\*\*Status:\*\*\s*(\w+)/);
+      if (statusMatch && toolBlock) {
+        toolBlock.toolStatus = statusMatch[1];
+      }
+
+      // Extract input
+      if (currentLine.includes('**Input:**')) {
+        i += 1;
+        // Skip ```json or ``` line
+        if (i < lines.length && lines[i].startsWith('```')) {
+          i += 1;
+        }
+        const inputLines: string[] = [];
+        while (i < lines.length && !lines[i].startsWith('```')) {
+          inputLines.push(lines[i]);
+          i += 1;
+        }
+        if (toolBlock) {
+          toolBlock.toolInput = inputLines.join('\n').trim();
+        }
+        continue;
+      }
+
+      // Extract output
+      if (currentLine.includes('**Output:**')) {
+        i += 1;
+        // Skip ``` line
+        if (i < lines.length && lines[i].startsWith('```')) {
+          i += 1;
+        }
+        const outputLines: string[] = [];
+        while (i < lines.length && !lines[i].startsWith('```')) {
+          outputLines.push(lines[i]);
+          i += 1;
+        }
+        if (toolBlock) {
+          toolBlock.toolOutput = outputLines.join('\n').trim();
+        }
+        continue;
+      }
+
+      // Collect other tool block content (simple text output without **Output:** label)
+      if (currentLine.trim() && !currentLine.startsWith('```')) {
+        if (!['**Status:**', '**Input:**', '**Output:**'].some((k) => currentLine.includes(k))) {
+          if (toolBlock && !toolBlock.toolOutput && !toolBlock.toolInput) {
+            if (toolBlock.toolOutput === '') {
+              toolBlock.toolOutput = currentLine.trim();
+            } else {
+              toolBlock.toolOutput += '\n' + currentLine.trim();
+            }
+          }
+        }
+      }
+    } else if (inStepBlock) {
+      // Collect step block content (AI thinking and answer)
+      if (currentLine.trim() || stepLines.length > 0) {
+        stepLines.push(currentLine);
+      }
+    } else {
+      // Regular message content (question text after Assistant timestamp)
+      if (currentLine.trim() || messageLines.length > 0) {
+        messageLines.push(currentLine);
+      }
+    }
+
+    i += 1;
+  }
+
+  // Save remaining message content
+  if (messageLines.length > 0 && !inToolBlock && !inStepBlock) {
+    const msgContent = messageLines.join('\n').trim();
+    if (msgContent) {
+      pushAssistantText(msgContent);
+    }
+  }
+
+  // Save remaining step block
+  if (stepLines.length > 0 && inStepBlock) {
+    const stepContent = stepLines.join('\n').trim();
+    if (stepContent) {
+      pushAssistantText(stepContent);
+    }
+  }
+
+  // Save remaining tool block
+  if (toolBlock) {
+    blocks.push(toolBlock);
+  }
+
+  // Attach usage metadata to the first message block of this section
+  if (sectionMeta) {
+    for (const b of blocks) {
+      if (b.type === 'message') {
+        b.usage = sectionMeta;
+        break;
+      }
+    }
+  }
+
+  // 标题未带标签时按内容推导（reasoning > tool > text，与 formatter getAssistantTag 一致）
+  let hasReasoningBlock = false;
+  let hasToolBlock = false;
+  for (const b of blocks) {
+    if (b.type === 'tool') {
+      hasToolBlock = true;
+    } else if (b.kind === 'reasoning') {
+      hasReasoningBlock = true;
+    }
+  }
+  const sectionStepTag: AssistantStepTag =
+    headingStepTag ?? (hasReasoningBlock ? '分析过程' : hasToolBlock ? '执行过程' : '回复内容');
+  for (const b of blocks) {
+    b.stepId = stepId;
+    b.stepTag = sectionStepTag;
+  }
+
+  return { blocks, nextIndex: i };
+}
+
+/** formatter formatChildSession 写出的子会话级消息标题（4 级，与主会话 2/3 级不冲突） */
+const CHILD_MESSAGE_HEADING_RE = /^#### (?:👤 User|🤖 Assistant)/;
+
+/**
+ * 解析 `### 📦 Subagent:` 开头的子会话段落为 child-session 容器块。
+ * 子会话无轮次概念，内部消息平铺进 children：user 正文用围栏保护收集，
+ * assistant 体复用 collectAssistantSection（以子会话级消息标题为额外边界，
+ * 遇到下一个子会话/区块边界则交还上层）。
+ */
+function collectChildSessionSection(
+  lines: string[],
+  headingLineIndex: number,
+  title: string,
+): { block: ConversationBlock; nextIndex: number } {
+  let i = headingLineIndex + 1;
+  let startedAt = '';
+  if (i < lines.length) {
+    const startedMatch = lines[i].match(/^\*Started:\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\*/);
+    if (startedMatch) {
+      startedAt = startedMatch[1];
+      i += 1;
+    }
+  }
+
+  const children: ConversationBlock[] = [];
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // 下一个子会话或区块级边界：交还上层处理
+    if (CHILD_SECTION_BOUNDARY_RE.test(line)) break;
+
+    if (/^#### 👤 User/.test(line)) {
+      let timestamp = '';
+      let j = i + 1;
+      if (j < lines.length) {
+        const timeMatch = lines[j].match(/\*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\*/);
+        if (timeMatch) {
+          timestamp = timeMatch[1];
+          j += 1;
+        }
+      }
+
+      const bodyLines: string[] = [];
+      let inFence = false;
+      while (j < lines.length) {
+        const l = lines[j];
+        if (l.trimStart().startsWith('```')) {
+          inFence = !inFence;
+          bodyLines.push(l);
+          j += 1;
+          continue;
+        }
+        if (!inFence && (CHILD_MESSAGE_HEADING_RE.test(l) || CHILD_SECTION_BOUNDARY_RE.test(l))) break;
+        bodyLines.push(l);
+        j += 1;
+      }
+
+      const content = bodyLines.join('\n').trim();
+      if (content) {
+        children.push({ type: 'message', role: 'user', timestamp, content });
+      }
+      i = j;
+      continue;
+    }
+
+    if (/^#### 🤖 Assistant/.test(line)) {
+      const res = collectAssistantSection(lines, i, CHILD_MESSAGE_HEADING_RE);
+      for (const b of res.blocks) {
+        b.role = 'assistant';
+      }
+      children.push(...res.blocks);
+      i = res.nextIndex;
+      continue;
+    }
+
+    i += 1;
+  }
+
+  return {
+    block: { type: 'child-session', timestamp: startedAt, childTitle: title, children },
+    nextIndex: i,
+  };
+}
+
+/**
  * 解析单个 session block 内的对话，按主会话级用户提问划分轮次。
  * - `<!-- AUTORECORD-TURN -->` 分隔符：新轮次起点（formatter 对每条真实输入写入）
  * - 旧格式 fallback：以 `## 👤 User` 标题为等价边界，但 synthetic-only
  *   注入消息不开新轮次，归入当前轮次（turn=0 表示任何轮次之前的前置内容）
+ * - `### 📦 Subagent:` 段落恢复为 child-session 容器块，归属当前轮次
  */
 export function parseBlockConversation(blockContent: string): ConversationBlock[] {
   const blocks: ConversationBlock[] = [];
@@ -436,291 +820,24 @@ export function parseBlockConversation(blockContent: string): ConversationBlock[
 
     // Detect assistant message block
     if (ASSISTANT_HEADING_RE.test(line)) {
-      // Extract timestamp from next line
-      let timestamp = '';
-      if (i + 1 < lines.length) {
-        const timeMatch = lines[i + 1].match(/\*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\*/);
-        if (timeMatch) {
-          timestamp = timeMatch[1];
-          i += 1;
-        }
+      const res = collectAssistantSection(lines, i);
+      // 本节产出的全部 block 归属当前轮次（assistant 角色）
+      for (const b of res.blocks) {
+        b.role = 'assistant';
+        if (currentTurn > 0) b.turn = currentTurn;
       }
+      blocks.push(...res.blocks);
+      i = res.nextIndex;
+      continue;
+    }
 
-      // 步骤组：标题后缀标签优先，缺省时 section 结束后按内容推导
-      const headingStepTag = parseAssistantStepTag(line);
-      const stepId = ++assistantStepIdCounter;
-
-      /** 按拆分结果 push assistant 文本块（reasoning/reply 共享同一 stepId） */
-      const pushAssistantText = (rawContent: string): void => {
-        for (const seg of splitAssistantMessageBlock(rawContent)) {
-          blocks.push({ type: 'message', stepId, timestamp, content: seg.content, kind: seg.kind });
-        }
-      };
-
-      // Collect message content until next block
-      i += 1;
-      const sectionStartIndex = blocks.length;
-      let sectionMeta: BlockUsage | null = null;
-      const messageLines: string[] = [];
-      let inToolBlock = false;
-      let toolBlock: ConversationBlock | null = null;
-      let inStepBlock = false;
-      let stepLines: string[] = [];
-      // 代码围栏状态：围栏内是引用的源码/输出原文，其中的字面量标记行与标题行
-      // 不构成任何结构边界（工具块的围栏由下方 Input/Output 提取逻辑自行消费）
-      let inFence = false;
-
-      while (i < lines.length) {
-        const currentLine = lines[i];
-
-        if (!inToolBlock && currentLine.trimStart().startsWith('```')) {
-          inFence = !inFence;
-        }
-
-        // 精确边界锚定（不用裸 --- ：工具输出/正文中可能出现分隔线）；围栏内不判界
-        if (!inFence && isConversationBoundary(currentLine)) {
-          break;
-        }
-
-        // 围栏内：纯内容收集，跳过全部结构判定
-        if (inFence && !inToolBlock) {
-          if (inStepBlock) {
-            if (currentLine.trim() || stepLines.length > 0) {
-              stepLines.push(currentLine);
-            }
-          } else {
-            if (currentLine.trim() || messageLines.length > 0) {
-              messageLines.push(currentLine);
-            }
-          }
-          i += 1;
-          continue;
-        }
-
-        // Usage metadata line (📊 key=value ...), not part of the visible content
-        if (!inToolBlock && !inStepBlock && currentLine.startsWith('📊')) {
-          const parsed = parseAssistantMetaLine(currentLine);
-          if (parsed) {
-            sectionMeta = parsed;
-            i += 1;
-            continue;
-          }
-        }
-
-        // Check for tool block start（锚定行首：引用正文中出现同款文本不算工具块）
-        const toolMatch = currentLine.match(/^#### 🔧 Tool:\s*(\w+)/);
-        if (toolMatch) {
-          // Save previous message content if any
-          if (messageLines.length > 0 && !inToolBlock && !inStepBlock) {
-            const msgContent = messageLines.join('\n').trim();
-            if (msgContent) {
-              pushAssistantText(msgContent);
-            }
-            messageLines.length = 0;
-          }
-
-          inToolBlock = true;
-          toolBlock = {
-            type: 'tool',
-            timestamp,
-            toolName: toolMatch[1],
-            toolStatus: '',
-            toolInput: '',
-            toolOutput: '',
-          };
-          i += 1;
-          continue;
-        }
-
-        // Check for step finish: ends tool block and/or step block
-        if (STEP_FINISH_LINE_RE.test(currentLine)) {
-          // Close step block first if still open (old-format files interleave
-          // reasoning and tools inside one [step-start]…[step-finish] range;
-          // saving step content first keeps block order aligned with the source)
-          if (inStepBlock) {
-            const stepContent = stepLines.join('\n').trim();
-            if (stepContent) {
-              pushAssistantText(stepContent);
-            }
-            inStepBlock = false;
-            stepLines = [];
-          }
-
-          // Save tool block
-          if (toolBlock) {
-            blocks.push(toolBlock);
-          }
-          inToolBlock = false;
-          toolBlock = null;
-          i += 1;
-          continue;
-        }
-
-        // Check for step block start: [step-start]
-        if (STEP_START_LINE_RE.test(currentLine)) {
-          // 连续两个 [step-start]（历史脏数据）：先落盘已积累的步骤内容再开新块，
-          // 避免两段 reasoning 被合并进同一块
-          if (inStepBlock) {
-            const prevStep = stepLines.join('\n').trim();
-            if (prevStep) {
-              pushAssistantText(prevStep);
-            }
-          }
-
-          // Save previous message content as question if any
-          if (messageLines.length > 0 && !inToolBlock && !inStepBlock) {
-            const msgContent = messageLines.join('\n').trim();
-            if (msgContent) {
-              pushAssistantText(msgContent);
-            }
-            messageLines.length = 0;
-          }
-
-          inStepBlock = true;
-          stepLines = [];
-          i += 1;
-          continue;
-        }
-
-        // Check for step block end: [step-end]
-        if (STEP_END_LINE_RE.test(currentLine)) {
-          // Save step block as assistant answer
-          if (inStepBlock) {
-            const stepContent = stepLines.join('\n').trim();
-            if (stepContent) {
-              pushAssistantText(stepContent);
-            }
-            inStepBlock = false;
-            stepLines = [];
-          }
-          // 状态机外的孤儿 [step-end]（历史脏数据）直接丢弃，
-          // 不落入正文形成"[step-end]"垃圾卡片
-          i += 1;
-          continue;
-        }
-
-        // Collect content
-        if (inToolBlock) {
-          // Extract status
-          const statusMatch = currentLine.match(/\*\*Status:\*\*\s*(\w+)/);
-          if (statusMatch && toolBlock) {
-            toolBlock.toolStatus = statusMatch[1];
-          }
-
-          // Extract input
-          if (currentLine.includes('**Input:**')) {
-            i += 1;
-            // Skip ```json or ``` line
-            if (i < lines.length && lines[i].startsWith('```')) {
-              i += 1;
-            }
-            const inputLines: string[] = [];
-            while (i < lines.length && !lines[i].startsWith('```')) {
-              inputLines.push(lines[i]);
-              i += 1;
-            }
-            if (toolBlock) {
-              toolBlock.toolInput = inputLines.join('\n').trim();
-            }
-            continue;
-          }
-
-          // Extract output
-          if (currentLine.includes('**Output:**')) {
-            i += 1;
-            // Skip ``` line
-            if (i < lines.length && lines[i].startsWith('```')) {
-              i += 1;
-            }
-            const outputLines: string[] = [];
-            while (i < lines.length && !lines[i].startsWith('```')) {
-              outputLines.push(lines[i]);
-              i += 1;
-            }
-            if (toolBlock) {
-              toolBlock.toolOutput = outputLines.join('\n').trim();
-            }
-            continue;
-          }
-
-          // Collect other tool block content (simple text output without **Output:** label)
-          if (currentLine.trim() && !currentLine.startsWith('```')) {
-            if (!['**Status:**', '**Input:**', '**Output:**'].some((k) => currentLine.includes(k))) {
-              if (toolBlock && !toolBlock.toolOutput && !toolBlock.toolInput) {
-                if (toolBlock.toolOutput === '') {
-                  toolBlock.toolOutput = currentLine.trim();
-                } else {
-                  toolBlock.toolOutput += '\n' + currentLine.trim();
-                }
-              }
-            }
-          }
-        } else if (inStepBlock) {
-          // Collect step block content (AI thinking and answer)
-          if (currentLine.trim() || stepLines.length > 0) {
-            stepLines.push(currentLine);
-          }
-        } else {
-          // Regular message content (question text after Assistant timestamp)
-          if (currentLine.trim() || messageLines.length > 0) {
-            messageLines.push(currentLine);
-          }
-        }
-
-        i += 1;
-      }
-
-      // Save remaining message content
-      if (messageLines.length > 0 && !inToolBlock && !inStepBlock) {
-        const msgContent = messageLines.join('\n').trim();
-        if (msgContent) {
-          pushAssistantText(msgContent);
-        }
-      }
-
-      // Save remaining step block
-      if (stepLines.length > 0 && inStepBlock) {
-        const stepContent = stepLines.join('\n').trim();
-        if (stepContent) {
-          pushAssistantText(stepContent);
-        }
-      }
-
-      // Save remaining tool block
-      if (toolBlock) {
-        blocks.push(toolBlock);
-      }
-
-      // Attach usage metadata to the first message block of this section
-      if (sectionMeta) {
-        for (let bi = sectionStartIndex; bi < blocks.length; bi++) {
-          if (blocks[bi].type === 'message') {
-            blocks[bi].usage = sectionMeta;
-            break;
-          }
-        }
-      }
-
-      // 本节产出的全部 block 归属当前轮次（assistant 角色）并聚合为同一步骤组；
-      // 标题未带标签时按内容推导（reasoning > tool > text，与 formatter getAssistantTag 一致）
-      let hasReasoningBlock = false;
-      let hasToolBlock = false;
-      for (let bi = sectionStartIndex; bi < blocks.length; bi++) {
-        blocks[bi].role = 'assistant';
-        blocks[bi].stepId = stepId;
-        if (blocks[bi].type === 'tool') {
-          hasToolBlock = true;
-        } else if (blocks[bi].kind === 'reasoning') {
-          hasReasoningBlock = true;
-        }
-        if (currentTurn > 0) blocks[bi].turn = currentTurn;
-      }
-      const sectionStepTag: AssistantStepTag =
-        headingStepTag ?? (hasReasoningBlock ? '分析过程' : hasToolBlock ? '执行过程' : '回复内容');
-      for (let bi = sectionStartIndex; bi < blocks.length; bi++) {
-        blocks[bi].stepTag = sectionStepTag;
-      }
-
+    // 子会话（subagent）段落：恢复为结构化 child-session 容器块，归属当前轮次
+    const childHeadingMatch = line.match(/^### 📦 Subagent:\s*(.+?)\s*$/);
+    if (childHeadingMatch) {
+      const res = collectChildSessionSection(lines, i, childHeadingMatch[1]);
+      if (currentTurn > 0) res.block.turn = currentTurn;
+      blocks.push(res.block);
+      i = res.nextIndex;
       continue;
     }
 
@@ -1285,7 +1402,41 @@ const DETAIL_CSS = `
     .session-detail-modal-title-content .session-date { font-size: 14px; color: var(--text-weak); }
     .session-detail-modal-close { width: 36px; height: 36px; border-radius: 50%; background: var(--bg-strong); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; color: var(--text-weaker); transition: all 0.2s ease; flex-shrink: 0; }
     .session-detail-modal-close:hover { background: var(--border-weak); color: var(--text-strong); }
-    .session-detail-modal-content { padding: 32px 40px 40px; overflow-y: auto; flex: 1; background: var(--bg-weak); }
+    /* ── 弹窗正文两列：左目录树 + 右对话内容 ── */
+    .session-detail-modal-content { display: grid; grid-template-columns: 280px minmax(0, 1fr); overflow: hidden; flex: 1; min-height: 0; background: var(--bg-weak); }
+    .session-detail-modal-content.no-toc { display: block; overflow-y: auto; padding: 32px 40px 40px; }
+    .detail-toc { overflow-y: auto; min-height: 0; padding: 24px 14px 40px 18px; border-right: 1px solid var(--border-weak); background: var(--surface); }
+    .detail-toc-title { font-family: var(--font-display); font-size: 12px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-weaker); margin-bottom: 12px; padding-left: 8px; }
+    .toc-section-label { font-family: var(--font-display); font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-weak); padding: 12px 8px 6px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .toc-section-label:hover { color: var(--accent); }
+    .toc-turn-block { margin-bottom: 2px; }
+    .toc-item { font-size: 13px; color: var(--text-strong); padding: 5px 8px; border-radius: 8px; cursor: pointer; line-height: 1.4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; user-select: none; }
+    .toc-item:hover { background: var(--bg-weak); }
+    .toc-item.active { background: var(--accent-weak); }
+    .toc-level-turn { font-weight: 600; }
+    .toc-turn-summary { font-weight: 400; font-size: 12px; color: var(--text-weak); }
+    .toc-sub { margin-left: 13px; padding-left: 9px; border-left: 2px solid var(--border-weak); display: flex; flex-direction: column; }
+    .toc-level-step { font-size: 12px; color: var(--text-weak); }
+    .toc-level-step.analysis:hover { color: var(--step-analysis-text); }
+    .toc-level-step.execution:hover { color: var(--step-execution-text); }
+    .toc-level-step.reply:hover { color: var(--step-reply-text); }
+    .toc-level-child { font-size: 12px; color: var(--text-weak); }
+    .toc-level-child:hover { color: #32ADE6; }
+    .detail-body { overflow-y: auto; min-width: 0; padding: 32px 40px 40px; }
+    .section-anchor { display: block; height: 0; }
+    .turn-group, .step-group, .child-session-block, .section-anchor { scroll-margin-top: 12px; }
+    /* ── 子会话卡片（📦 Subagent）：青色系，与步骤组三色区分 ── */
+    .conversation-block.child-session-block { border-left: 3px solid #32ADE6; background: linear-gradient(135deg, rgba(50,173,230,0.05), rgba(50,173,230,0.01)); padding: 0; overflow: hidden; }
+    .child-session-header { display: flex; align-items: center; gap: 10px; padding: 13px 16px; cursor: pointer; user-select: none; transition: background 0.2s ease; flex-wrap: wrap; }
+    .child-session-header:hover { background: rgba(50,173,230,0.07); }
+    .child-session-badge { flex-shrink: 0; font-family: var(--font-display); font-size: 11px; font-weight: 700; letter-spacing: 0.03em; color: #32ADE6; background: rgba(50,173,230,0.14); padding: 3px 10px; border-radius: 9999px; white-space: nowrap; }
+    .child-session-title { flex: 1; min-width: 0; font-family: var(--font-display); font-size: 14px; font-weight: 600; color: var(--text-strong); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .child-session-meta { flex-shrink: 0; font-size: 12px; color: var(--text-weak); }
+    .child-session-body { display: none; padding: 14px 16px 16px; border-top: 1px solid var(--border-weak); background: var(--bg-weak); }
+    .child-session-block.open .child-session-body { display: block; }
+    .child-session-block.open > .child-session-header .turn-chevron { transform: rotate(90deg); }
+    .child-session-body .conversation-block { margin-bottom: 14px; }
+    .child-session-body .conversation-block:last-child { margin-bottom: 0; }
     .conversation-block { background: var(--surface); border-radius: 16px; padding: 24px; margin-bottom: 20px; box-shadow: var(--card-shadow); border: 1px solid var(--border-weak); }
     .conversation-block:last-child { margin-bottom: 0; }
     .conversation-block-header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--border-weak); }
@@ -1373,7 +1524,9 @@ const DETAIL_CSS = `
       .session-detail-modal-header { padding: 24px 24px 20px; }
       .session-detail-modal-icon { width: 40px; height: 40px; }
       .session-detail-modal-title-content h2 { font-size: 18px; }
-      .session-detail-modal-content { padding: 24px 24px 32px; }
+      .session-detail-modal-content, .session-detail-modal-content.no-toc { display: block; overflow-y: auto; padding: 24px 24px 32px; }
+      .detail-toc { display: none; }
+      .detail-body { overflow: visible; padding: 0; }
       .conversation-block { padding: 16px; }
       .turn-header { padding: 11px 12px; gap: 8px; }
       .turn-summary { font-size: 13px; }
@@ -1946,20 +2099,28 @@ export function buildProjectHtml(project: ProjectData): string {
       renderSessionStatsBar(session.stats);
 
       const contentEl = document.getElementById('sessionDetailModalContent');
-      let html = '';
 
       if (session.conversationBlocks && session.conversationBlocks.length > 0) {
-        html = renderTurnSections(session.conversationBlocks);
+        const rendered = renderTurnSections(session.conversationBlocks);
+        contentEl.innerHTML =
+          '<aside class="detail-toc">' +
+          '<div class="detail-toc-title">目录</div>' +
+          rendered.toc +
+          '</aside>' +
+          '<div class="detail-body">' + rendered.html + '</div>';
+        contentEl.classList.remove('no-toc');
       } else {
-        html = '<div class="session-detail-note">该会话时间较早，HTML 中未内联完整对话内容。<br>完整内容请查看对应 Markdown 文件：<br><code>' + escapeHtml(session.filename) + '</code></div>';
+        contentEl.innerHTML = '<div class="session-detail-note">该会话时间较早，HTML 中未内联完整对话内容。<br>完整内容请查看对应 Markdown 文件：<br><code>' + escapeHtml(session.filename) + '</code></div>';
+        contentEl.classList.add('no-toc');
       }
-
-      contentEl.innerHTML = html;
       document.getElementById('sessionDetailModalOverlay').classList.add('active');
       document.body.style.overflow = 'hidden';
     }
 
     function renderBlockCard(block) {
+      if (block.type === 'child-session') {
+        return renderChildSessionCard(block, null);
+      }
       if (block.type === 'message') {
         const isUser = block.role === 'user';
         const roleClass = isUser ? 'user' : 'assistant';
@@ -2032,7 +2193,7 @@ export function buildProjectHtml(project: ProjectData): string {
       return rest || content;
     }
 
-    function renderStepGroup(gBlocks) {
+    function renderStepGroup(gBlocks, anchorId) {
       const first = gBlocks[0];
       const meta = STEP_TAG_META[first.stepTag] || { icon: '🤖', cls: 'analysis' };
       let usageBlock = null;
@@ -2042,7 +2203,7 @@ export function buildProjectHtml(project: ProjectData): string {
         if (b.type === 'tool') toolCount += 1;
       }
 
-      let html = '<div class="conversation-block step-group ' + meta.cls + '">';
+      let html = '<div class="conversation-block step-group ' + meta.cls + '"' + (anchorId ? ' id="' + anchorId + '"' : '') + '>';
       html += '<div class="step-group-header">';
       html += '<span class="step-badge ' + meta.cls + '">' + meta.icon + ' ' + escapeHtml(first.stepTag || '助手') + '</span>';
       if (toolCount > 0) {
@@ -2077,22 +2238,54 @@ export function buildProjectHtml(project: ProjectData): string {
       return html;
     }
 
-    /** 轮次体渲染：有 stepId 的 assistant 块聚合为步骤组容器，其余保持原卡片 */
-    function renderTurnBody(blocks) {
-      return groupAssistantSteps(blocks).map(gBlocks =>
-        hasStepInfo(gBlocks[0]) ? renderStepGroup(gBlocks) : gBlocks.map(renderBlockCard).join('')
-      ).join('');
+    /** 子会话卡片：📦 头部 + 可折叠体；内部消息复用步骤组/卡片渲染（无轮次概念） */
+    function renderChildSessionCard(block, anchorId) {
+      const children = block.children || [];
+      let html = '<div class="conversation-block child-session-block" data-child-group' + (anchorId ? ' id="' + anchorId + '"' : '') + '>';
+      html += '<div class="child-session-header" data-action="toggle-turn">';
+      html += '<svg class="turn-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>';
+      html += '<span class="child-session-badge">📦 Subagent</span>';
+      html += '<span class="child-session-title">' + escapeHtml(block.childTitle || '子代理') + '</span>';
+      let metaBits = [];
+      if (children.length > 0) metaBits.push(children.length + ' 条消息');
+      if (block.timestamp) metaBits.push(escapeHtml(block.timestamp));
+      if (metaBits.length > 0) {
+        html += '<span class="child-session-meta">' + metaBits.join(' · ') + '</span>';
+      }
+      html += '</div>';
+      html += '<div class="child-session-body">';
+      html += renderTurnBody(children, null);
+      html += '</div>';
+      html += '</div>';
+      return html;
+    }
+
+    /** 轮次体渲染：有 stepId 的 assistant 块聚合为步骤组容器，其余保持原卡片；
+     * anchorBase 提供时给每个组容器写入稳定 id（目录树跳转目标，编号 tsi-gigki） */
+    function renderTurnBody(blocks, anchorBase) {
+      return groupAssistantSteps(blocks).map(function(gBlocks, ki) {
+        const gid = anchorBase ? anchorBase + 'g' + ki : null;
+        if (gBlocks[0].type === 'child-session') {
+          return renderChildSessionCard(gBlocks[0], gid);
+        }
+        if (hasStepInfo(gBlocks[0])) {
+          return renderStepGroup(gBlocks, gid);
+        }
+        return gBlocks.map(renderBlockCard).join('');
+      }).join('');
     }
 
     /**
-     * 按用户提问划分轮次渲染（可折叠手风琴）。
+     * 按用户提问划分轮次渲染（可折叠手风琴），同时产出左侧目录树。
      * 分段规则：turn===1 且 role==='user' 的块开启新的会话段（对应 topic 文件中的一个 session 块）；
      * 段内按 turn 编号分组。旧数据（无 role/turn 字段）降级为平铺渲染。
+     * 返回 { html, toc }。锚点编号：段 sec-si、轮次 turn-tsi-gi、组内条目 tsi-gig-ki
+     * （TOC 与正文用同一 groupAssistantSteps 分组，编号必然对齐）。
      */
     function renderTurnSections(blocks) {
       const hasTurnInfo = blocks.some(b => b.role === 'user' && typeof b.turn === 'number' && b.turn > 0);
       if (!hasTurnInfo) {
-        return renderTurnBody(blocks);
+        return { html: renderTurnBody(blocks, null), toc: '' };
       }
 
       const sections = [];
@@ -2110,20 +2303,28 @@ export function buildProjectHtml(project: ProjectData): string {
         group.blocks.push(b);
       }
 
+      const multiSection = sections.length > 1;
       let html = '';
+      let toc = '';
       sections.forEach((sec, si) => {
+        html += '<span id="sec-' + si + '" class="section-anchor"></span>';
         if (si > 0) {
           html += '<div class="session-section-divider"><span>续篇会话 · ' + (si + 1) + '/' + sections.length + '</span></div>';
         }
-        sec.forEach((group) => {
+        if (multiSection) {
+          toc += '<div class="toc-section-label" data-action="toc-jump" data-target-id="sec-' + si + '">会话 ' + (si + 1) + '/' + sections.length + '</div>';
+        }
+
+        sec.forEach((group, gi) => {
           const firstUser = group.blocks.find(b => b.role === 'user' && b.content);
           const summarySource = (firstUser ? firstUser.content : '') || '';
           const summaryLine = summarySource.split('\\n').map(l => l.trim()).find(l => l && l.indexOf(INJECTED_MARKER) !== 0) || '';
           const shortSummary = summaryLine.length > 80 ? summaryLine.substring(0, 80) + '…' : (summaryLine || '(无文本)');
           const timeLabel = firstUser ? firstUser.timestamp : '';
           const isContext = group.key === 0;
+          const base = 't' + si + '-' + gi;
 
-          html += '<div class="turn-group" data-turn-group>';
+          html += '<div class="turn-group" data-turn-group id="turn-' + base + '">';
           html += '<div class="turn-header" data-action="toggle-turn">';
           html += '<svg class="turn-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>';
           html += '<span class="turn-badge' + (isContext ? ' context' : '') + '">' + (isContext ? '上下文' : '第 ' + group.key + ' 轮') + '</span>';
@@ -2133,12 +2334,39 @@ export function buildProjectHtml(project: ProjectData): string {
           }
           html += '</div>';
           html += '<div class="turn-body">';
-          html += renderTurnBody(group.blocks);
+          html += renderTurnBody(group.blocks, base);
           html += '</div>';
           html += '</div>';
+
+          // TOC：轮次节点（摘要截短，与正文手风琴一一对应）
+          const tocLabel = isContext ? '上下文' : '第 ' + group.key + ' 轮';
+          const tocSummary = summaryLine.length > 26 ? summaryLine.substring(0, 26) + '…' : (summaryLine || '');
+          toc += '<div class="toc-turn-block">';
+          toc += '<div class="toc-item toc-level-turn" data-action="toc-jump" data-target-id="turn-' + base + '">' + escapeHtml(tocLabel) + (tocSummary ? '<span class="toc-turn-summary">' + escapeHtml(tocSummary) + '</span>' : '') + '</div>';
+
+          // TOC：步骤组/子会话节点（与 renderTurnBody 相同分组规则）
+          toc += '<div class="toc-sub">';
+          groupAssistantSteps(group.blocks).forEach((gBlocks, ki) => {
+            const gid = base + 'g' + ki;
+            const head = gBlocks[0];
+            if (head.type === 'child-session') {
+              const childTitle = head.childTitle || '子代理';
+              const shortChild = childTitle.length > 20 ? childTitle.substring(0, 20) + '…' : childTitle;
+              toc += '<div class="toc-item toc-level-child" data-action="toc-jump" data-target-id="' + gid + '">📦 ' + escapeHtml(shortChild) + '</div>';
+            } else if (hasStepInfo(head)) {
+              const meta = STEP_TAG_META[head.stepTag] || { icon: '🤖', cls: 'analysis', label: head.stepTag || '助手' };
+              let toolCount = 0;
+              for (const gb of gBlocks) {
+                if (gb.type === 'tool') toolCount += 1;
+              }
+              toc += '<div class="toc-item toc-level-step ' + meta.cls + '" data-action="toc-jump" data-target-id="' + gid + '">' + meta.icon + ' ' + escapeHtml(head.stepTag || '助手') + (toolCount > 0 ? ' ×' + toolCount : '') + '</div>';
+            }
+          });
+          toc += '</div>';
+          toc += '</div>';
         });
       });
-      return html;
+      return { html: html, toc: toc };
     }
 
     function closeSessionDetailModal() {
@@ -2315,14 +2543,38 @@ export function buildProjectHtml(project: ProjectData): string {
           closeSessionDetailModal();
           break;
         case 'toggle-turn': {
-          const groupEl = actionEl.closest('[data-turn-group]');
+          // child-session 卡片嵌套在轮次手风琴内部，closest 取最近的折叠容器，
+          // 点击子会话头部时不会误展开外层轮次
+          const groupEl = actionEl.closest('[data-child-group], [data-turn-group]');
           if (groupEl) {
             groupEl.classList.toggle('open');
-            const body = groupEl.querySelector('.turn-body');
-            if (groupEl.classList.contains('open') && body && typeof Prism !== 'undefined' && Prism.highlightAllUnder) {
-              Prism.highlightAllUnder(body);
+            if (groupEl.classList.contains('open') && typeof Prism !== 'undefined' && Prism.highlightAllUnder) {
+              Prism.highlightAllUnder(groupEl);
             }
           }
+          break;
+        }
+        case 'toc-jump': {
+          const targetId = actionEl.getAttribute('data-target-id');
+          const target = targetId ? document.getElementById(targetId) : null;
+          if (!target) break;
+          // 先展开目标所在的折叠容器（轮次手风琴/子会话卡片），再滚动定位
+          let acc = target.closest('.turn-group, .child-session-block');
+          while (acc) {
+            const changed = !acc.classList.contains('open');
+            acc.classList.add('open');
+            if (changed && typeof Prism !== 'undefined' && Prism.highlightAllUnder) {
+              Prism.highlightAllUnder(acc);
+            }
+            acc = acc.parentElement ? acc.parentElement.closest('.turn-group, .child-session-block') : null;
+          }
+          const tocRoot = document.getElementById('sessionDetailModalContent');
+          if (tocRoot) {
+            const prev = tocRoot.querySelector('.toc-item.active');
+            if (prev) prev.classList.remove('active');
+            actionEl.classList.add('active');
+          }
+          target.scrollIntoView({ behavior: 'smooth', block: 'start' });
           break;
         }
       }
@@ -2442,10 +2694,11 @@ async function ensureProjectDetail(
 // ─── Main Entry Point ────────────────────────────────────────────────────────
 
 /**
- * 视图渲染结构版本。HTML 渲染逻辑发生结构性变化（如轮次手风琴分组）时 +1，
+ * 视图渲染结构版本。HTML 渲染逻辑发生结构性变化（如轮次手风琴分组、
+ * 两列目录树/subagent 子会话恢复）时 +1，
  * regenerateViews 检测到不一致会强制重建全部项目页（存量页面刷新）。
  */
-const VIEW_VERSION = 6;
+const VIEW_VERSION = 7;
 
 export async function regenerateViews(globalSaveDir: string): Promise<void> {
   const baseDir = globalSaveDir;
