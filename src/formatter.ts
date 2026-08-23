@@ -459,20 +459,19 @@ function detectLanguage(code: string): string {
 }
 
 function getAssistantTag(parts: PartData[]): string {
-  const hasReasoning = parts.some(p => p.type === 'reasoning');
-  const hasTool = parts.some(p => p.type === 'tool');
-  const hasText = parts.some(p => p.type === 'text');
-
-  if (hasReasoning) {
-    return '[分析过程]';
+  // 按优先级收集全部命中标签（如 `[分析过程] · [回复内容]`），
+  // 让标题对消息内容诚实；解析层只取首个标签，展示分类由渲染层按块 kind 切分
+  const tags: string[] = [];
+  if (parts.some(p => p.type === 'reasoning')) {
+    tags.push('[分析过程]');
   }
-  if (hasTool) {
-    return '[执行过程]';
+  if (parts.some(p => p.type === 'tool')) {
+    tags.push('[执行过程]');
   }
-  if (hasText) {
-    return '[回复内容]';
+  if (parts.some(p => p.type === 'text')) {
+    tags.push('[回复内容]');
   }
-  return '';
+  return tags.join(' · ');
 }
 
 function formatTimestamp(date: Date): string {

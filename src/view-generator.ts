@@ -2172,17 +2172,33 @@ export function buildProjectHtml(project: ProjectData): string {
       return !!(b && b.role === 'assistant' && typeof b.stepId === 'number');
     }
 
-    /** 相邻且 stepId 相同的 assistant 块聚合为步骤组；无 stepId 的旧数据各自成组（降级平铺） */
+    /** 相邻且 stepId 相同的 assistant 块聚合为步骤组；无 stepId 的旧数据各自成组（降级平铺）。
+     *  聚合后二次切分：组内首个正文块（kind='reply'，非工具/非推理）起独立为「回复内容」结论卡，
+     *  分析/执行过程留在原组——最终回答不应被埋进 🧠 分析过程 徽章与目录条目里 */
     function groupAssistantSteps(blocks) {
-      const out = [];
+      const joined = [];
       let cur = null;
       for (const b of blocks) {
         if (cur && cur.join && hasStepInfo(b) && cur.id === b.stepId) {
           cur.blocks.push(b);
         } else {
           cur = { id: hasStepInfo(b) ? b.stepId : null, join: hasStepInfo(b), blocks: [b] };
-          out.push(cur);
+          joined.push(cur);
         }
+      }
+      const out = [];
+      for (const g of joined) {
+        const idx = g.join ? g.blocks.findIndex(function (b) { return b.kind === 'reply'; }) : -1;
+        if (idx <= 0) {
+          out.push(g);
+          continue;
+        }
+        const tail = g.blocks.slice(idx);
+        for (const tb of tail) {
+          tb.stepTag = '回复内容';
+        }
+        out.push({ id: g.id, join: true, blocks: g.blocks.slice(0, idx) });
+        out.push({ id: g.id, join: true, blocks: tail });
       }
       return out.map(g => g.blocks);
     }
@@ -2697,10 +2713,10 @@ async function ensureProjectDetail(
 
 /**
  * 视图渲染结构版本。HTML 渲染逻辑发生结构性变化（如轮次手风琴分组、
- * 两列目录树/subagent 子会话恢复）时 +1，
+ * 两列目录树/subagent 子会话恢复、含结论的步骤组按 kind 切分出独立回复卡）时 +1，
  * regenerateViews 检测到不一致会强制重建全部项目页（存量页面刷新）。
  */
-const VIEW_VERSION = 7;
+const VIEW_VERSION = 8;
 
 /**
  * 再生成全部 HTML 视图。
