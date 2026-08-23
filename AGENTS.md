@@ -42,6 +42,9 @@ npm run typecheck # tsc --noEmit（严格模式）
 - **双主题**：视图默认暗色（`data-theme="dark"`，暖黑 + 柠檬黄 opencode 风格），导航栏按钮可切换浅色并持久化到 `localStorage['autorecord-theme']`；颜色集中在 CSS 变量（改主题只需改变量块）
 - **原子写入**：HTML 通过 `.tmp` 临时文件 + `rename` 原子替换；`projects/` 目录从项目扫描中排除（`PROJECTS_DIR`）
 - **残留清理**：每次视图再生成时对比 `projects/` 下的 `.html` 文件与当前项目列表，删除已不存在的项目对应页面（`cleanupStaleProjectPages`）
+- **过期自检（stale-guard）**：插件初始化时对自身 dist 计算代码指纹，写盘前节流复检（5s）；指纹不一致（开发期间重新 build）即粘性判定过期，所有写盘短路并通过 app.log 提示一次"重启 opencode"，防止运行中的旧逻辑覆盖新逻辑产出
+- **数据格式版本戳 + fail-closed**：md 会话块头部带 `<!-- AUTORECORD-SCHEMA: N -->`（`SCHEMA_VERSION`），解析到更高版本的块时拒绝覆盖；同一 id 重复块保留 schema 最高者。索引层同理：磁盘 index 的 `version`/`viewVersion` 高于本地认知时放弃再生与 saveIndex（`readStoredIndexVersions`）
+- **开发期目录隔离**：环境变量 `AUTORECORD_HOME` 重定向数据根目录，开发调试与真实数据物理隔离
 
 ## CLI
 

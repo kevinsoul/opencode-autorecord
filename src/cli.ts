@@ -1,15 +1,16 @@
 #!/usr/bin/env node
 import { resolve, join } from 'node:path';
+import { homedir } from 'node:os';
 
 import { existsSync, statSync } from 'node:fs';
 import { regenerateViews } from './view-generator.js';
 
 function printUsage(): void {
   console.log(`
-用法: opencode-autorecord regenerate <保存目录>
+用法: opencode-autorecord regenerate [保存目录]
 
 参数:
-  <保存目录>  全局保存目录的路径，通常是 ~/opencode-autorecord
+  [保存目录]  全局保存目录的路径；缺省时依次读取 AUTORECORD_HOME 环境变量、~/opencode-autorecord
 
 示例:
   opencode-autorecord regenerate ~/opencode-autorecord
@@ -20,6 +21,18 @@ function printUsage(): void {
   如果存在索引文件 (.autorecord-index.json)，将使用增量扫描；
   否则将执行全量扫描并创建新的索引。
 `);
+}
+
+function resolveSaveDir(arg?: string): string | null {
+  if (arg) {
+    return resolve(arg);
+  }
+  const envHome = process.env.AUTORECORD_HOME?.trim();
+  if (envHome) {
+    return resolve(envHome);
+  }
+  const home = homedir();
+  return home ? join(home, 'opencode-autorecord') : null;
 }
 
 async function main(): Promise<void> {
@@ -37,15 +50,13 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const saveDir = args[1];
+  const resolvedPath = resolveSaveDir(args[1]);
 
-  if (!saveDir) {
-    console.error('错误: 请提供保存目录路径');
+  if (!resolvedPath) {
+    console.error('错误: 无法确定保存目录（未提供参数且无法读取用户主目录）');
     printUsage();
     process.exit(1);
   }
-
-  const resolvedPath = resolve(saveDir);
 
   if (!existsSync(resolvedPath)) {
     console.error(`错误: 目录不存在: ${resolvedPath}`);
@@ -63,7 +74,12 @@ async function main(): Promise<void> {
 
   try {
     const outputDir = resolvedPath;
-    await regenerateViews(outputDir);
+    const result = await regenerateViews(outputDir);
+    if (result === 'skipped-newer-index') {
+      console.error('\n⚠ 已跳过重新生成：磁盘上的索引由更高版本的 opencode-autorecord 写入。');
+      console.error('  请升级 CLI/插件后再试，详见 .autorecord-views.log');
+      process.exit(1);
+    }
     console.log('\n✓ 视图重新生成完成！');
     console.log(`  HTML 概览页: ${join(outputDir, 'opencode-overview.html')}`);
   } catch (error) {

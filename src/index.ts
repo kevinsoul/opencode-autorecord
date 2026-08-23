@@ -37,6 +37,7 @@ import {
 } from './session-tracker.js';
 import { formatSession, extractTopicFromMessage } from './formatter.js';
 import { regenerateViews } from './view-generator.js';
+import { initStaleGuard, checkStale, consumeStaleWarning } from './stale-guard.js';
 
 const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const viewDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -62,6 +63,8 @@ function scheduleViewRegeneration(dir: string, delay: number): void {
 const plugin: Plugin = async (input) => {
   try {
     const { directory, client } = input;
+
+    await initStaleGuard();
 
     const globalPath = getGlobalSaveDirectory(directory);
     if (globalPath) {
@@ -242,6 +245,19 @@ async function saveSessionToFile(
   globalSaveDir: string | null
 ): Promise<void> {
   try {
+    // 过期自检：磁盘构建产物已被重新生成时，本进程持有旧逻辑，
+    // 所有写盘操作（会话保存与视图再生）必须短路，直到重启 opencode
+    if (await checkStale()) {
+      if (consumeStaleWarning()) {
+        void logApp(
+          client,
+          'warn',
+          'opencode-autorecord plugin is outdated (dist changed on disk); writes disabled until opencode restarts'
+        );
+      }
+      return;
+    }
+
     const session = getSession(sessionID);
     if (!session) return;
 
@@ -328,7 +344,19 @@ async function saveSessionToFile(
     if (globalSaveDir) {
       const filename = generateFilename(title || 'untitled', session.createdAt, DEFAULT_CONFIG);
       const globalFilePath = `${globalSaveDir}/${filename}`;
-      await saveSessionToTopicFile(globalFilePath, sessionID, content, title || 'untitled');
+      const saveResult = await saveSessionToTopicFile(
+        globalFilePath,
+        sessionID,
+        content,
+        title || 'untitled'
+      );
+      if (saveResult === 'skipped-newer') {
+        void logApp(
+          client,
+          'warn',
+          `Skipped session ${sessionID}: existing block written by newer schema version`
+        );
+      }
 
       // Trigger view regeneration for main sessions
       if (!session.parentID && DEFAULT_CONFIG.view.enabled) {

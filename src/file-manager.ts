@@ -1,11 +1,25 @@
 import { mkdir, writeFile, readFile, rename, unlink } from 'node:fs/promises';
-import { join, dirname, basename } from 'node:path';
+import { join, dirname, basename, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import type { PluginConfig } from './types.js';
 
 const INVALID_FILENAME_CHARS = /[/\\:*?"<>|]/g;
 const MULTIPLE_HYPHENS = /-+/g;
 const LEADING_TRAILING_HYPHENS = /^-+|-+$/g;
+
+/**
+ * 会话块数据格式版本。写入每个块的头部注释（AUTORECORD-SCHEMA），
+ * 解析时遇到更高版本的块必须跳过覆盖（fail-closed），防止旧逻辑破坏新格式数据。
+ */
+export const SCHEMA_VERSION = 2;
+const SCHEMA_LINE_RE = /^<!-- AUTORECORD-SCHEMA: (\d+) -->$/;
+
+interface TopicBlock {
+  id: string;
+  content: string;
+  /** 未标记的存量块视为 v1（undefined） */
+  schemaVersion?: number;
+}
 
 const fileLocks = new Map<string, Promise<void>>();
 
@@ -80,18 +94,33 @@ export function sanitizeTopic(topic: string, maxLength: number): string {
   return sanitized || 'untitled';
 }
 
-function parseTopicBlocks(content: string): Array<{ id: string; content: string }> {
-  const blocks: Array<{ id: string; content: string }> = [];
+/** 从块内容首行提取 schema 版本标记；无标记的存量内容视为 v1 */
+function extractBlockSchema(lines: string[]): { schemaVersion: number | undefined; contentLines: string[] } {
+  if (lines.length > 0) {
+    const match = lines[0].match(SCHEMA_LINE_RE);
+    if (match) {
+      return { schemaVersion: parseInt(match[1], 10), contentLines: lines.slice(1) };
+    }
+  }
+  return { schemaVersion: undefined, contentLines: lines };
+}
+
+function parseTopicBlocks(content: string): TopicBlock[] {
+  const blocks: TopicBlock[] = [];
   const lines = content.split('\n');
   let currentId: string | null = null;
   let currentLines: string[] = [];
 
+  const flushCurrent = (): void => {
+    if (currentId === null) return;
+    const { schemaVersion, contentLines } = extractBlockSchema(currentLines);
+    blocks.push({ id: currentId, content: contentLines.join('\n').trimEnd(), schemaVersion });
+  };
+
   for (const line of lines) {
     const match = line.match(/^<!-- AUTORECORD-SESSION-BLOCK: ([^>]+) -->$/);
     if (match) {
-      if (currentId !== null) {
-        blocks.push({ id: currentId, content: currentLines.join('\n').trimEnd() });
-      }
+      flushCurrent();
       currentId = match[1];
       currentLines = [];
     } else if (currentId !== null) {
@@ -99,27 +128,23 @@ function parseTopicBlocks(content: string): Array<{ id: string; content: string 
     }
   }
 
-  if (currentId !== null) {
-    blocks.push({ id: currentId, content: currentLines.join('\n').trimEnd() });
-  }
+  flushCurrent();
 
-  // Deduplicate: keep the last occurrence of each session-id
-  const seen = new Set<string>();
-  const deduped: Array<{ id: string; content: string }> = [];
-  for (let i = blocks.length - 1; i >= 0; i--) {
-    const block = blocks[i];
-    if (!seen.has(block.id)) {
-      seen.add(block.id);
-      deduped.unshift(block);
+  // Deduplicate: 同一 session-id 出现多次时保留 schema 版本最高的块（同版本保留最后一次），
+  // 避免旧逻辑追加的低版本副本覆盖新格式数据
+  const best = new Map<string, TopicBlock>();
+  for (const block of blocks) {
+    const cur = best.get(block.id);
+    if (!cur || (block.schemaVersion ?? 1) >= (cur.schemaVersion ?? 1)) {
+      best.set(block.id, block);
     }
   }
-
-  return deduped;
+  return blocks.filter((b) => best.get(b.id) === b);
 }
 
 function buildTopicFile(
   topic: string,
-  blocks: Array<{ id: string; content: string }>
+  blocks: TopicBlock[]
 ): string {
   const lines: string[] = [];
   lines.push(`# Topic: ${topic}`);
@@ -129,6 +154,9 @@ function buildTopicFile(
   for (const block of blocks) {
     lines.push('');
     lines.push(`<!-- AUTORECORD-SESSION-BLOCK: ${block.id} -->`);
+    if (block.schemaVersion !== undefined) {
+      lines.push(`<!-- AUTORECORD-SCHEMA: ${block.schemaVersion} -->`);
+    }
     lines.push(block.content);
   }
 
@@ -142,13 +170,15 @@ function buildTopicFile(
   return content;
 }
 
+export type TopicFileSaveResult = 'saved' | 'unchanged' | 'skipped-newer';
+
 export async function saveSessionToTopicFile(
   filePath: string,
   sessionId: string,
   content: string,
   topic: string
-): Promise<boolean> {
-  return withFileLock(filePath, async () => {
+): Promise<TopicFileSaveResult> {
+  return withFileLock(filePath, async (): Promise<TopicFileSaveResult> => {
     try {
       await mkdir(dirname(filePath), { recursive: true });
 
@@ -164,23 +194,34 @@ export async function saveSessionToTopicFile(
       const blocks = parseTopicBlocks(existingContent);
       const existingIdx = blocks.findIndex((b) => b.id === sessionId);
 
+      // fail-closed：磁盘上的块由更高版本逻辑写入时，保留原块拒绝覆盖
+      if (
+        existingIdx >= 0 &&
+        (blocks[existingIdx].schemaVersion ?? 1) > SCHEMA_VERSION
+      ) {
+        console.warn(
+          `[autorecord] Skipped session ${sessionId} in ${filePath}: block schema v${String(blocks[existingIdx].schemaVersion)} is newer than local v${SCHEMA_VERSION}`
+        );
+        return 'skipped-newer';
+      }
+
       if (existingIdx >= 0) {
-        blocks[existingIdx] = { id: sessionId, content };
+        blocks[existingIdx] = { id: sessionId, content, schemaVersion: SCHEMA_VERSION };
       } else {
-        blocks.push({ id: sessionId, content });
+        blocks.push({ id: sessionId, content, schemaVersion: SCHEMA_VERSION });
       }
 
       const newContent = buildTopicFile(topic, blocks);
 
       if (newContent === existingContent) {
-        return true;
+        return 'unchanged';
       }
 
       const tempPath = `${filePath}.tmp`;
       try {
         await writeFile(tempPath, newContent, 'utf-8');
         await rename(tempPath, filePath);
-        return true;
+        return 'saved';
       } catch (error) {
         console.error(`[autorecord] Failed to write file ${filePath}:`, error);
         try {
@@ -188,11 +229,11 @@ export async function saveSessionToTopicFile(
         } catch {
           // Ignore cleanup errors
         }
-        return false;
+        return 'unchanged';
       }
     } catch (error) {
       console.error(`[autorecord] Failed to save session to ${filePath}:`, error);
-      return false;
+      return 'unchanged';
     }
   });
 }
@@ -243,15 +284,23 @@ export async function saveImageFromBase64(
 
 export function getGlobalSaveDirectory(projectDir: string): string | null {
   try {
-    const home = homedir();
-    if (!home) {
-      return null;
+    // AUTORECORD_HOME 允许重定向数据根目录（开发/测试时与真实数据物理隔离）
+    const envHome = process.env.AUTORECORD_HOME?.trim();
+    let baseDir: string;
+    if (envHome) {
+      baseDir = resolve(envHome);
+    } else {
+      const home = homedir();
+      if (!home) {
+        return null;
+      }
+      baseDir = join(home, 'opencode-autorecord');
     }
 
     const projectName = basename(projectDir);
     const sanitizedProjectName = sanitizeTopic(projectName, 50);
 
-    return join(home, 'opencode-autorecord', sanitizedProjectName);
+    return join(baseDir, sanitizedProjectName);
   } catch {
     return null;
   }

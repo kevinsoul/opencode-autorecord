@@ -16,6 +16,8 @@ import {
   convertIndexToProjects,
   latestSessionTimeMs,
   validateAndRepairIndexes,
+  readStoredIndexVersions,
+  INDEX_VERSION,
   PROJECTS_DIR,
   type AutorecordIndex,
   type SessionInfo,
@@ -2700,11 +2702,30 @@ async function ensureProjectDetail(
  */
 const VIEW_VERSION = 7;
 
-export async function regenerateViews(globalSaveDir: string): Promise<void> {
+/**
+ * 再生成全部 HTML 视图。
+ * 返回 'ok' 表示完成（含增量）；'skipped-newer-index' 表示磁盘索引由更高版本代码
+ * 写入，已按 fail-closed 跳过本次再生与索引写入。
+ */
+export async function regenerateViews(globalSaveDir: string): Promise<'ok' | 'skipped-newer-index'> {
   const baseDir = globalSaveDir;
   const logPath = join(baseDir, '.autorecord-views.log');
 
   try {
+    // fail-closed：磁盘索引由更高版本代码写入（index/view 版本超过本地认知）时，
+    // 放弃本次再生与 saveIndex，避免旧逻辑降级覆盖新格式数据造成版本震荡
+    const stored = await readStoredIndexVersions(baseDir);
+    if (
+      (stored.primaryIndexVersion ?? 0) > INDEX_VERSION ||
+      (stored.viewVersion ?? 0) > VIEW_VERSION
+    ) {
+      await writeViewLog(
+        logPath,
+        `WARN: Skipped regeneration - index written by newer code (index v${String(stored.primaryIndexVersion)}/view v${String(stored.viewVersion)} > local index v${INDEX_VERSION}/view v${VIEW_VERSION})`
+      );
+      return 'skipped-newer-index';
+    }
+
     // Validate and repair indexes (also handles v1 migration)
     const index = await validateAndRepairIndexes(baseDir);
     let projects: ProjectData[];
@@ -2808,6 +2829,7 @@ export async function regenerateViews(globalSaveDir: string): Promise<void> {
     // Always save index, even if projects.length === 0
     // This ensures orphan cleanup in validateAndRepairIndexes is persisted
     await saveIndex(baseDir, index);
+    return 'ok';
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await writeViewLog(logPath, `ERROR: Failed to regenerate views - ${message}`);

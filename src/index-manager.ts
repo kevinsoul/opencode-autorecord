@@ -122,9 +122,31 @@ export type AutorecordIndex = UnifiedIndex;
 
 // v4: 新增 usage 统计（📊 元数据行 + 文件头用量表），旧缓存作废强制全量重扫
 // v5: ConversationBlock 新增 role/turn（按用户提问分轮次），旧缓存作废强制全量重扫
-const INDEX_VERSION = 6;
+export const INDEX_VERSION = 6;
 const PRIMARY_INDEX_FILENAME = '.autorecord-index.json';
 const SECONDARY_INDEX_FILENAME = '.project-index.json';
+
+export interface StoredIndexVersions {
+  primaryIndexVersion?: number;
+  viewVersion?: number;
+}
+
+/**
+ * 读取磁盘上主索引的版本信息（不迁移、不修复、不写入）。
+ * 用于写入前检测索引是否由更高版本的代码产生，防止旧代码降级覆盖新格式索引。
+ */
+export async function readStoredIndexVersions(baseDir: string): Promise<StoredIndexVersions> {
+  try {
+    const content = await readFile(join(baseDir, PRIMARY_INDEX_FILENAME), 'utf-8');
+    const raw = JSON.parse(content) as { version?: number; viewVersion?: number };
+    return {
+      primaryIndexVersion: typeof raw.version === 'number' ? raw.version : undefined,
+      viewVersion: typeof raw.viewVersion === 'number' ? raw.viewVersion : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
 
 // 生成的 HTML 页面统一存放的目录名（需要从项目扫描中排除）
 export const PROJECTS_DIR = 'projects';

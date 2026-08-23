@@ -151,8 +151,25 @@ npx opencode-autorecord regenerate ~/opencode-autorecord
 # Regenerate views (pass the root of the global save directory) / 重新生成视图（传入全局保存目录的根路径）
 opencode-autorecord regenerate ~/opencode-autorecord
 ```
-
 > **Windows users**: `~` is not expanded on Windows — use a full path like `C:\Users\<username>\opencode-autorecord` instead. See [Platform Notes](#platform-notes--平台说明). / **Windows 用户**：Windows 下 `~` 不会展开，请使用完整路径如 `C:\Users\<用户名>\opencode-autorecord`，详见[平台说明](#platform-notes--平台说明)。
+
+
+## Advanced / 进阶
+
+### Custom data directory / 自定义数据目录（`AUTORECORD_HOME`）
+
+Set the `AUTORECORD_HOME` environment variable to redirect the data root (defaults to `~/opencode-autorecord`). Useful for development/testing — plugin writes stay physically isolated from your real data. / 设置环境变量 `AUTORECORD_HOME` 可重定向数据根目录（默认 `~/opencode-autorecord`）。适用于开发调试场景——插件写入与真实数据物理隔离：
+
+```bash
+AUTORECORD_HOME=/tmp/ar-dev opencode
+```
+
+The CLI reads the same variable as a fallback for its directory argument, so `opencode-autorecord regenerate` without arguments targets the isolated directory too. / CLI 的目录参数缺省时同样读取该变量，便于对隔离目录执行 regenerate。
+
+### Data safety during development / 开发期的数据安全机制
+
+- **Stale self-check**: on startup the plugin fingerprints its own build output; if the fingerprint changes while running (e.g. you rebuilt during development), all disk writes are disabled until opencode restarts / **过期自检**：插件启动时对自身构建产物计算指纹；运行期间产物被重新构建（如开发中重新 build）后，所有写盘操作自动禁用，直到重启 opencode
+- **Schema versioning**: every session block is stamped with a schema version; blocks written by a newer version are never overwritten by older logic (fail-closed), and the same applies to index/view versions / **格式版本戳**：会话块与索引均带版本戳，旧逻辑遇到更高版本的数据会拒绝覆盖（fail-closed）
 
 
 ## Platform Notes / 平台说明
