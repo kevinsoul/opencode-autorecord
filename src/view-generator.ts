@@ -1043,10 +1043,6 @@ function parseDate(dateStr: string): Date {
 
 // ─── HTML Overview Generator ─────────────────────────────────────────────────
 
-function formatDate(dateStr: string): string {
-  return dateStr.includes(' ') ? dateStr.split(' ')[0] : dateStr;
-}
-
 function formatTimestamp(ts: number): string {
   if (ts === 0) return '未知';
   const d = new Date(ts);
@@ -1063,26 +1059,27 @@ function computeCategoryStats(projects: ProjectData[]): Record<string, number> {
   return stats;
 }
 
-function buildDashboard(stats: Record<string, number>, total: number): string {
-  const order = ['功能开发', '界面设计', '问题修复', '配置设置', '版本控制', '性能优化', '文档编写', '开发讨论'];
-  const cards: string[] = [];
+const CATEGORY_ORDER = ['功能开发', '界面设计', '问题修复', '配置设置', '版本控制', '性能优化', '文档编写', '开发讨论'];
 
-  for (const cat of order) {
-    const count = stats[cat] || 0;
-    if (count === 0) continue;
-    const pct = Math.round((count / total) * 100);
-    const color = CATEGORY_COLORS[cat]?.text || '#8E8E93';
-    cards.push(`
-      <div class="dashboard-card">
-        <div class="dashboard-count" style="color:${color}">${count}</div>
-        <div class="dashboard-label">${cat}</div>
-        <div class="dashboard-bar"><div class="dashboard-bar-fill" style="width:${pct}%;background:${color}"></div></div>
-        <div class="dashboard-percentage">${pct}%</div>
-      </div>`);
-  }
+function buildHero(projects: ProjectData[], totalSessions: number): string {
+  const stats = computeCategoryStats(projects);
+  const latestTs = projects.reduce((max, p) => Math.max(max, p.lastModified), 0);
+  const latestText = latestTs > 0 ? formatTimestamp(latestTs) : '—';
 
-  if (cards.length === 0) return '';
-  return `<div class="dashboard-section"><div class="dashboard-grid">${cards.join('')}</div></div>`;
+  const cats = CATEGORY_ORDER
+    .filter((cat) => (stats[cat] || 0) > 0)
+    .map((cat) => {
+      const color = CATEGORY_COLORS[cat]?.text || '#8E8E93';
+      return `<span class="hero-cat"><i style="background:${color}"></i>${escapeHtml(cat)}<b>${stats[cat]}</b></span>`;
+    })
+    .join('');
+
+  return `
+      <header class="hero">
+        <h1 class="hero-title">会话档案</h1>
+        <p class="hero-sub"><b>${projects.length}</b> PROJECTS <span class="hero-sep">//</span> <b>${totalSessions}</b> SESSIONS <span class="hero-sep">//</span> 最近活动 ${latestText}</p>
+        ${cats ? `<div class="hero-cats">${cats}</div>` : ''}
+      </header>`;
 }
 
 // ─── HTML 页面生成（二级索引架构：主索引页 + 项目页）──────────────────────────
@@ -1107,6 +1104,9 @@ const COMMON_CSS = `
       --font-text: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
       --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       --nav-height: 68px;
+      --page-max: 1560px;
+      --page-pad: 48px;
+      --sidebar-w: 224px;
     }
     /* ── 双主题：默认暗色（与官网 claode.cn 一致的暖黑 + 柠檬黄）── */
     [data-theme="dark"] {
@@ -1129,6 +1129,9 @@ const COMMON_CSS = `
       --shadow: 0 20px 60px hsla(0, 100%, 0%, 0.5);
       --card-shadow: 0 2px 12px hsla(0, 100%, 0%, 0.35);
       --hover-shadow: 0 12px 40px hsla(0, 100%, 0%, 0.45);
+      --grid-line: hsla(0, 30%, 90%, 0.028);
+      --grid-glow: hsla(62, 100%, 90%, 0.06);
+      --noise-opacity: 0.05;
       --step-analysis-text: hsl(262, 85%, 78%);
       --step-execution-text: hsl(28, 95%, 66%);
       --step-reply-text: hsl(140, 55%, 58%);
@@ -1153,6 +1156,9 @@ const COMMON_CSS = `
       --shadow: 0 20px 60px hsla(0, 50%, 10%, 0.08);
       --card-shadow: 0 2px 12px hsla(0, 50%, 10%, 0.05);
       --hover-shadow: 0 12px 40px hsla(0, 50%, 10%, 0.10);
+      --grid-line: hsla(30, 6%, 20%, 0.05);
+      --grid-glow: hsla(62, 80%, 50%, 0.07);
+      --noise-opacity: 0.04;
       --step-analysis-text: #6941C6;
       --step-execution-text: #B54708;
       --step-reply-text: #1F9D41;
@@ -1168,6 +1174,28 @@ const COMMON_CSS = `
       -webkit-font-smoothing: antialiased;
       transition: background 0.35s ease, color 0.35s ease;
     }
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      z-index: -1;
+      pointer-events: none;
+      background:
+        radial-gradient(ellipse 62% 46% at 50% -8%, var(--grid-glow), transparent 68%),
+        radial-gradient(ellipse 40% 34% at 88% 108%, var(--grid-glow), transparent 70%),
+        linear-gradient(var(--grid-line) 1px, transparent 1px),
+        linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+      background-size: auto, auto, 44px 44px, 44px 44px;
+    }
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      z-index: -1;
+      pointer-events: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)'/%3E%3C/svg%3E");
+      opacity: var(--noise-opacity);
+    }
     .nav-bar {
       position: sticky; top: 0; z-index: 100;
       height: var(--nav-height);
@@ -1177,7 +1205,7 @@ const COMMON_CSS = `
       padding: 16px 32px;
     }
     .nav-content {
-      max-width: 1200px; margin: 0 auto;
+      max-width: var(--page-max); margin: 0 auto;
       display: flex; justify-content: space-between; align-items: center; gap: 24px;
     }
     .nav-left { display: flex; align-items: center; gap: 32px; flex: 1; }
@@ -1232,37 +1260,50 @@ const COMMON_CSS = `
       .nav-search-container { max-width: none; order: 3; }
       .nav-stats { margin-left: auto; }
     }
-    .dashboard-section { padding: 0 0 24px; }
-    .dashboard-grid { display: flex; flex-wrap: nowrap; gap: 12px; overflow-x: auto; }
-    .dashboard-card {
-      background: var(--surface);
-      border-radius: 16px; padding: 16px 8px; border: 1px solid var(--border-weak);
-      box-shadow: var(--card-shadow); transition: all 0.3s cubic-bezier(0.4,0,0.2,1);
-      display: flex; flex-direction: column; align-items: center; text-align: center;
-      flex: 1 1 0; min-width: 80px; max-width: 200px;
+    /* ── Hero ── */
+    .hero {
+      grid-column: 1 / -1;
+      padding: 44px 0 30px;
+      border-bottom: 1px solid var(--border-weak);
+      margin-bottom: 28px;
     }
-    .dashboard-card:hover { transform: translateY(-3px); box-shadow: var(--hover-shadow); border-color: var(--border); }
-    .dashboard-count { font-family: var(--font-display); font-size: 28px; font-weight: 700; letter-spacing: -0.021em; margin-bottom: 2px; color: var(--text-strong); }
-    .dashboard-label { font-size: 12px; font-weight: 500; color: var(--text-weaker); margin-bottom: 10px; white-space: nowrap; }
-    .dashboard-bar { width: 100%; max-width: 80px; height: 4px; background: var(--border-weak); border-radius: 9999px; overflow: hidden; margin-bottom: 6px; }
-    .dashboard-bar-fill { height: 100%; border-radius: 9999px; transition: width 0.8s cubic-bezier(0.4,0,0.2,1); }
-    .dashboard-percentage { font-size: 11px; font-weight: 600; color: var(--text-weak); }
-    @media (max-width: 768px) {
-      .dashboard-section { padding: 0 0 16px; }
-      .dashboard-grid { gap: 8px; }
-      .dashboard-card { padding: 12px 6px; border-radius: 12px; min-width: 64px; }
-      .dashboard-count { font-size: 22px; }
-      .dashboard-label { font-size: 10px; }
-      .dashboard-bar { max-width: 50px; }
+    .hero-title {
+      font-family: var(--font-display);
+      font-size: clamp(34px, 4.5vw, 54px);
+      font-weight: 700; letter-spacing: -0.03em; line-height: 1.05;
+      color: var(--text-strong);
     }
-    .container { max-width: 1400px; margin: 0 auto; padding: 24px 48px 64px; display: flex; gap: 24px; align-items: flex-start; }
-    .sidebar {
-      width: 260px; flex-shrink: 0; position: fixed;
-      top: var(--nav-height); left: max(48px, calc(50% - 700px + 48px));
+    .hero-title::after { content: '_'; color: var(--accent); }
+    .hero-sub {
+      font-family: var(--font-mono);
+      font-size: 12.5px; letter-spacing: 0.08em; text-transform: uppercase;
+      color: var(--text-weak); margin-top: 14px;
+      display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
+    }
+    .hero-sub b { color: var(--accent); font-weight: 500; }
+    .hero-sep { color: var(--text-weaker); }
+    .hero-cats { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 22px; }
+    .hero-cat {
+      display: inline-flex; align-items: center; gap: 7px;
+      font-size: 12px; font-weight: 500; color: var(--text);
       background: var(--surface); border: 1px solid var(--border-weak);
-      border-radius: 16px; padding: 16px 12px;
+      padding: 5px 12px; border-radius: 9999px;
+    }
+    .hero-cat i { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+    .hero-cat b { font-family: var(--font-mono); font-weight: 500; color: var(--text-weak); font-size: 11px; }
+    /* ── 骨架：版心 + 双列 grid + sticky 侧栏 ── */
+    .container { max-width: var(--page-max); margin: 0 auto; padding: 0 var(--page-pad) 64px; }
+    .container-grid {
+      display: grid;
+      grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+      column-gap: 36px; align-items: start;
+    }
+    .sidebar {
+      position: sticky; top: calc(var(--nav-height) + 24px);
+      background: var(--surface); border: 1px solid var(--border-weak);
+      border-radius: 16px; padding: 14px 10px;
       box-shadow: var(--card-shadow);
-      max-height: calc(100vh - var(--nav-height) - 32px); overflow-y: auto;
+      max-height: calc(100vh - var(--nav-height) - 48px); overflow-y: auto;
     }
     .sidebar-title { font-size: 12px; font-weight: 600; color: var(--text-weak); text-transform: uppercase; letter-spacing: 0.05em; padding: 4px 8px 12px; }
     .sidebar-list { display: flex; flex-direction: column; gap: 2px; }
@@ -1277,8 +1318,8 @@ const COMMON_CSS = `
     .sidebar-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-strong); font-weight: 500; }
     .sidebar-time { font-size: 11px; color: var(--text-weak); }
     .sidebar-count { font-size: 12px; color: var(--text-weak); background: var(--bg-strong); padding: 2px 8px; border-radius: 9999px; flex-shrink: 0; }
-    .main-content { flex: 1; min-width: 0; margin-left: 284px; }
-    .view-switcher { display: flex; gap: 12px; margin-bottom: 32px; justify-content: center; }
+    .main-content { min-width: 0; }
+    .view-switcher { display: flex; gap: 10px; margin-bottom: 18px; }
     .view-btn {
       display: flex; align-items: center; gap: 8px; padding: 10px 20px;
       font-family: var(--font-text); font-size: 14px; font-weight: 500;
@@ -1288,58 +1329,54 @@ const COMMON_CSS = `
     }
     .view-btn:hover { background: var(--bg-weak); border-color: var(--border); }
     .view-btn.active { color: var(--accent-text); background: var(--accent); border-color: var(--accent); }
-    .projects-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 24px; }
-    .projects-list.hidden { display: none; }
-    .project-card {
-      background: var(--surface);
-      border-radius: 24px; border: 1px solid var(--border-weak);
-      box-shadow: var(--card-shadow);
-      overflow: hidden; transition: all 0.4s cubic-bezier(0.4,0,0.2,1);
+    /* ── 项目行式列表 ── */
+    .projects-list {
       display: flex; flex-direction: column;
+      background: var(--surface);
+      border: 1px solid var(--border-weak); border-radius: 18px;
+      box-shadow: var(--card-shadow); overflow: hidden;
     }
-    .project-card:hover {
-      background: var(--bg-strong);
-      box-shadow: var(--hover-shadow);
-      transform: translateY(-4px) scale(1.005);
+    .projects-list.hidden { display: none; }
+    .project-row {
+      position: relative;
+      display: grid;
+      grid-template-columns: 34px auto minmax(180px, 1.15fr) minmax(110px, 0.85fr) auto 24px;
+      align-items: center; column-gap: 18px;
+      padding: 15px 20px 15px 16px;
+      border-bottom: 1px solid var(--border-weak);
+      transition: background 0.2s ease;
     }
-    .project-card.hidden { display: none; }
-    .project-header {
-      padding: 20px 24px; cursor: pointer; display: flex;
-      justify-content: space-between; align-items: flex-start;
-      background: var(--surface); border-bottom: 1px solid transparent;
-      transition: all 0.3s ease; gap: 12px;
+    .project-row:last-child { border-bottom: none; }
+    .project-row::before {
+      content: ''; position: absolute; left: 0; top: -1px; bottom: -1px; width: 3px;
+      background: var(--project-accent-color, var(--accent));
+      opacity: 0; transition: opacity 0.2s ease;
     }
-    .project-header:hover { background: var(--bg-strong); }
-    .project-title-section { display: flex; align-items: center; gap: 16px; }
+    .project-row:hover { background: var(--bg-weak); }
+    .project-row:hover::before { opacity: 1; }
+    .project-row.hidden { display: none; }
+    .row-index { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-weaker); text-align: right; letter-spacing: 0.04em; }
     .project-icon {
-      width: 40px; height: 40px; border-radius: 12px;
       display: flex; align-items: center; justify-content: center; color: white;
       background: var(--project-accent-color, var(--accent));
     }
-    .project-info { display: flex; flex-direction: column; gap: 4px; }
-    .project-header h2 { font-family: var(--font-display); font-size: 19px; font-weight: 600; letter-spacing: -0.021em; color: var(--text-strong); }
-    .last-modified { font-size: 12px; color: var(--text-weak); font-weight: 400; letter-spacing: -0.01em; }
-    .project-meta { display: flex; align-items: center; gap: 16px; }
-    .badge { background: var(--bg-weak); color: var(--text-weaker); padding: 6px 14px; border-radius: 9999px; font-size: 13px; font-weight: 500; }
-    .project-content { background: var(--bg-weak); flex-shrink: 0; border-top: 1px solid var(--border-weak); }
-    .sessions-list { padding: 20px 24px; display: flex; flex-direction: column; gap: 12px; max-height: 320px; overflow-y: auto; }
-    .sessions-list::-webkit-scrollbar { width: 6px; }
-    .sessions-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 9999px; }
-    .session-item {
-      background: var(--surface); border-radius: 12px; padding: 16px 20px;
-      box-shadow: var(--card-shadow); transition: all 0.3s cubic-bezier(0.4,0,0.2,1);
-      border: 1px solid var(--border-weak); cursor: pointer; display: block;
-    }
-    .session-item:hover { box-shadow: var(--hover-shadow); transform: translateX(4px); }
-    .session-item.hidden { display: none; }
-    .session-title { font-family: var(--font-display); font-size: 14px; font-weight: 600; line-height: 1.4; letter-spacing: -0.016em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 6px; color: var(--text-strong); }
-    .session-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .project-row .project-icon { width: 38px; height: 38px; border-radius: 11px; flex-shrink: 0; }
+    .row-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+    .row-name { font-family: var(--font-display); font-size: 15.5px; font-weight: 600; letter-spacing: -0.018em; color: var(--text-strong); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .row-preview { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-weaker); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .row-catbar { height: 6px; border-radius: 9999px; overflow: hidden; display: flex; background: var(--bg-strong); }
+    .row-catbar-seg { height: 100%; min-width: 2px; }
+    .row-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
+    .row-count { font-size: 13px; font-weight: 600; color: var(--text); white-space: nowrap; }
+    .row-time { font-family: var(--font-mono); font-size: 11px; color: var(--text-weaker); white-space: nowrap; }
+    .row-arrow { color: var(--text-weaker); font-size: 17px; line-height: 1; justify-self: end; transition: transform 0.25s cubic-bezier(0.4,0,0.2,1), color 0.2s ease; }
+    .project-row:hover .row-arrow { transform: translateX(4px); color: var(--accent); }
     .session-date { font-size: 12px; color: var(--text-weak); display: flex; align-items: center; gap: 6px; }
     .session-date::before { content: ''; width: 4px; height: 4px; background: var(--border); border-radius: 50%; }
     .category-tag { padding: 3px 8px; border-radius: 9999px; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: -0.01em; }
     .session-request { font-size: 13px; color: var(--text-weaker); line-height: 1.4; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border-weak); }
     .session-more { text-align: center; font-size: 13px; font-weight: 500; color: var(--accent); padding: 12px 16px; }
-    .global-timeline-wrapper { max-width: 800px; margin: 0 auto; }
+    .global-timeline-wrapper { max-width: 920px; margin: 0 auto; }
     .global-timeline-wrapper.hidden { display: none; }
     .global-timeline-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 32px; padding: 0 8px; }
     .global-timeline-header h3 { font-family: var(--font-display); font-size: 24px; font-weight: 600; letter-spacing: -0.021em; color: var(--text-strong); }
@@ -1361,14 +1398,20 @@ const COMMON_CSS = `
     .global-timeline .timeline-request { font-size: 14px; color: var(--text-weaker); line-height: 1.5; padding-top: 12px; border-top: 1px solid var(--border-weak); overflow-wrap: anywhere; word-break: break-word; }
     .global-timeline .timeline-category { display: inline-block; padding: 3px 10px; border-radius: 9999px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: -0.01em; position: absolute; top: 24px; right: 24px; }
     @media (max-width: 768px) {
-      .container { padding: 32px 16px; }
-      .projects-list { grid-template-columns: 1fr; gap: 16px; }
-      .project-header { padding: 16px 20px; }
-      .project-icon { width: 36px; height: 36px; }
-      .sessions-list { padding: 16px 20px; }
-      .session-item { padding: 14px 16px; }
-      .view-switcher { margin-bottom: 24px; }
+      :root { --page-pad: 16px; }
+      .container-grid { grid-template-columns: 1fr; row-gap: 16px; }
+      .hero { padding: 28px 0 20px; margin-bottom: 4px; }
+      .hero-cats { margin-top: 14px; }
+      .sidebar { position: static; max-height: 200px; }
+      .main-content { min-width: 0; }
+      .view-switcher { margin-bottom: 14px; }
       .view-btn { padding: 8px 16px; font-size: 13px; }
+      .project-row {
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        column-gap: 12px; padding: 14px 14px;
+      }
+      .row-index, .row-catbar, .row-arrow { display: none; }
+      .row-name { font-size: 15px; }
       .global-timeline-header h3 { font-size: 20px; }
       .global-timeline::before { left: 36px; }
       .global-timeline .timeline-item { padding-bottom: 24px; }
@@ -1377,9 +1420,6 @@ const COMMON_CSS = `
       .global-timeline .timeline-title { font-size: 15px; }
       .global-timeline .timeline-meta-row { gap: 8px; }
       .global-timeline .timeline-project { padding: 4px 10px; font-size: 12px; }
-      .container { flex-direction: column; gap: 16px; }
-      .sidebar { width: 100%; position: static; max-height: 220px; }
-      .main-content { margin-left: 0; }
     }
     footer { text-align: center; padding: 64px 32px; margin-top: 48px; }
     .footer-text { font-size: 12px; color: var(--text-weak); }
@@ -1387,6 +1427,25 @@ const COMMON_CSS = `
     .footer-meta a { color: var(--accent); text-decoration: none; }
     .footer-meta a:hover { text-decoration: underline; }
     .footer-meta-sep { color: var(--border); }
+    /* ── 入场动效（尊重系统减弱动态设置）── */
+    @media (prefers-reduced-motion: no-preference) {
+      @keyframes rise-in {
+        from { opacity: 0; transform: translateY(14px); }
+        to { opacity: 1; transform: none; }
+      }
+      @keyframes caret-blink { 50% { opacity: 0; } }
+      .hero, .view-switcher, .sidebar {
+        animation: rise-in 0.55s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+      }
+      .hero { animation-delay: 30ms; }
+      .sidebar { animation-delay: 110ms; }
+      .view-switcher { animation-delay: 160ms; }
+      .projects-list:not(.hidden) .project-row {
+        animation: rise-in 0.55s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+        animation-delay: calc(200ms + var(--stagger-i, 0) * 45ms);
+      }
+      .hero-title::after { animation: caret-blink 1.15s steps(1) infinite; }
+    }
 `;
 
 // ─── 项目页专属 CSS（会话详情弹窗 + 代码块）───────────────────────────────────
@@ -1538,46 +1597,47 @@ const DETAIL_CSS = `
 
 // ─── 主索引页生成 ─────────────────────────────────────────────────────────────
 
-function buildProjectCards(projects: ProjectData[]): string {
-  return projects.map((p) => {
+function buildCategoryDistributionBar(sessions: SessionInfo[]): string {
+  if (sessions.length === 0) return '';
+  const counts: Record<string, number> = {};
+  for (const s of sessions) {
+    counts[s.category] = (counts[s.category] || 0) + 1;
+  }
+  const segs = CATEGORY_ORDER
+    .filter((cat) => (counts[cat] || 0) > 0)
+    .map((cat) => {
+      const color = CATEGORY_COLORS[cat]?.text || '#8E8E93';
+      return `<span class="row-catbar-seg" style="flex:${counts[cat]};background:${color}" title="${escapeHtml(cat)} ×${counts[cat]}"></span>`;
+    })
+    .join('');
+  return `<span class="row-catbar">${segs}</span>`;
+}
+
+function buildProjectRows(projects: ProjectData[]): string {
+  return projects.map((p, i) => {
     const color = getProjectColor(p.name);
     const icon = getProjectIcon(p.name);
-    const lastMod = formatTimestamp(p.lastModified);
     const href = projectPageHref(p.name);
-    const sessionsHtml = p.sessions.slice(0, 3).map((s) => {
-      const catColor = CATEGORY_COLORS[s.category] || CATEGORY_COLORS['开发讨论'];
-      return `
-        <a class="session-item" href="${href}${sessionAnchor(s.filename)}" data-title="${escapeHtml(s.title)}" data-request="${escapeHtml(s.userRequest)}">
-          <div class="session-title">${escapeHtml(s.title)}</div>
-          <div class="session-meta">
-            <span class="session-date">${formatDate(s.date)}</span>
-            <span class="category-tag" style="background:${catColor.bg};color:${catColor.text}">${s.category}</span>
-          </div>
-        </a>`;
-    }).join('');
+    const latest = p.sessions.reduce<SessionInfo | null>((acc, s) => {
+      return !acc || parseDate(s.date).getTime() > parseDate(acc.date).getTime() ? s : acc;
+    }, null);
+    const preview = latest ? escapeHtml(latest.title) : '暂无会话记录';
 
     return `
-      <div class="project-card" data-project="${escapeHtml(p.name)}" data-action="open-project" style="--project-accent-color:${color}; cursor: pointer;">
-        <div class="project-header">
-          <div class="project-title-section">
-            <div class="project-icon" style="background:${color}">
-              <i data-lucide="${icon}" style="width:20px;height:20px;color:white"></i>
-            </div>
-            <div class="project-info">
-              <h2>${escapeHtml(p.name)}</h2>
-              <span class="last-modified">最后对话: ${lastMod}</span>
-            </div>
-          </div>
-          <div class="project-meta">
-            <span class="badge">${p.count} 个会话</span>
-          </div>
-        </div>
-        <div class="project-content">
-          <div class="sessions-list">${sessionsHtml}
-            <a class="session-item session-more" href="${href}">查看全部 ${p.count} 个会话 →</a>
-          </div>
-        </div>
-      </div>`;
+      <a class="project-row" href="${href}" data-project="${escapeHtml(p.name)}" data-title="${latest ? escapeHtml(latest.title) : ''}" data-request="${latest ? escapeHtml(latest.userRequest) : ''}" data-action="open-project" style="--project-accent-color:${color}; --stagger-i:${i}">
+        <span class="row-index">${String(i + 1).padStart(2, '0')}</span>
+        <span class="project-icon"><i data-lucide="${icon}" style="width:18px;height:18px;color:white"></i></span>
+        <span class="row-main">
+          <span class="row-name">${escapeHtml(p.name)}</span>
+          <span class="row-preview">${preview}</span>
+        </span>
+        ${buildCategoryDistributionBar(p.sessions)}
+        <span class="row-meta">
+          <span class="row-count">${p.count} 会话</span>
+          <span class="row-time">${formatTimestamp(p.lastModified)}</span>
+        </span>
+        <span class="row-arrow">→</span>
+      </a>`;
   }).join('');
 }
 
@@ -1656,12 +1716,11 @@ function buildFooterMetaHtml(): string {
   return `<p class="footer-meta">${parts.join('<span class="footer-meta-sep">·</span>')}</p>`;
 }
 
-// 主索引页：仅含元数据（项目卡片 + 全局时间线 + 搜索），不内联对话内容
+// 主索引页：仅含元数据（项目行列表 + 全局时间线 + 搜索），不内联对话内容
 function buildOverviewHtml(projects: ProjectData[], totalSessions: number): string {
   const generatedTime = new Date().toLocaleString('zh-CN');
   const projectCount = projects.length;
-  const categoryStats = computeCategoryStats(projects);
-  const dashboard = buildDashboard(categoryStats, totalSessions);
+  const hero = buildHero(projects, totalSessions);
 
   return `<!DOCTYPE html>
 <html lang="zh-CN" data-theme="dark">
@@ -1700,14 +1759,15 @@ function buildOverviewHtml(projects: ProjectData[], totalSessions: number): stri
     </div>
   </nav>
 
-  <div class="container">
+  <div class="container container-grid">
+    ${hero}
+
     <aside class="sidebar">
       <div class="sidebar-title">项目列表（${projectCount}）</div>
       <div class="sidebar-list" id="projectSidebarList">${buildProjectSidebar(projects)}</div>
     </aside>
 
-    <div class="main-content">
-      ${dashboard}
+    <main class="main-content">
       <div class="view-switcher">
         <button class="view-btn active" id="btnGrid" data-action="switch-view" data-view="grid">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
@@ -1719,7 +1779,7 @@ function buildOverviewHtml(projects: ProjectData[], totalSessions: number): stri
         </button>
       </div>
 
-      <div class="projects-list" id="projectsList">${buildProjectCards(projects)}</div>
+      <div class="projects-list" id="projectsList">${buildProjectRows(projects)}</div>
 
       <div class="global-timeline-wrapper hidden" id="globalTimelineWrapper">
         <div class="global-timeline-header">
@@ -1728,7 +1788,7 @@ function buildOverviewHtml(projects: ProjectData[], totalSessions: number): stri
         </div>
         <div class="global-timeline" id="globalTimeline">${buildGlobalTimeline(projects)}</div>
       </div>
-    </div>
+    </main>
   </div>
 
   <footer>
@@ -1758,7 +1818,7 @@ function buildOverviewHtml(projects: ProjectData[], totalSessions: number): stri
     }
 
     function initProjectsData() {
-      document.querySelectorAll('.project-card').forEach(card => {
+      document.querySelectorAll('.project-row').forEach(card => {
         const projectName = card.getAttribute('data-project');
         const color = getProjectColor(projectName);
         card.style.setProperty('--project-accent-color', color);
@@ -1775,22 +1835,13 @@ function buildOverviewHtml(projects: ProjectData[], totalSessions: number): stri
       });
 
       if (!isTimeline) {
-        document.querySelectorAll('.project-card').forEach(card => {
-          const projectName = (card.getAttribute('data-project') || '').toLowerCase();
-          const sessions = card.querySelectorAll('.session-item');
-          let hasVisible = projectName.includes(filter);
-          if (!hasVisible) {
-            sessions.forEach(s => {
-              const title = s.getAttribute('data-title') || '';
-              const request = s.getAttribute('data-request') || '';
-              const match = title.includes(filter) || request.includes(filter);
-              s.classList.toggle('hidden', !match);
-              if (match) hasVisible = true;
-            });
-          } else {
-            sessions.forEach(s => s.classList.remove('hidden'));
-          }
-          card.classList.toggle('hidden', !hasVisible);
+        document.querySelectorAll('.project-row').forEach(row => {
+          const haystack = [
+            row.getAttribute('data-project') || '',
+            row.getAttribute('data-title') || '',
+            row.getAttribute('data-request') || ''
+          ].join(' ').toLowerCase();
+          row.classList.toggle('hidden', !haystack.includes(filter));
         });
       } else {
         let visibleCount = 0;
@@ -2716,7 +2767,7 @@ async function ensureProjectDetail(
  * 两列目录树/subagent 子会话恢复、含结论的步骤组按 kind 切分出独立回复卡）时 +1，
  * regenerateViews 检测到不一致会强制重建全部项目页（存量页面刷新）。
  */
-const VIEW_VERSION = 8;
+const VIEW_VERSION = 9;
 
 /**
  * 再生成全部 HTML 视图。
