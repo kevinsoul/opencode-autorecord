@@ -12,7 +12,7 @@ npm run typecheck # tsc --noEmit（严格模式）
 
 - **双入口**：`src/index.ts`（OpenCode 插件）+ `src/cli.ts`（CLI 工具）
 - **ESM 模块**（`"type": "module"`），构建输出 `dist/`
-- **外部依赖**：`@opencode-ai/plugin`、`@opencode-ai/sdk`（不打包进产物）
+- **外部依赖**：`@opencode/plugin`、`@opencode/client`（不打包进产物）
 
 ## TypeScript 约束
 
@@ -31,7 +31,7 @@ npm run typecheck # tsc --noEmit（严格模式）
 - **集中存储**：会话保存到 `~/opencode-autorecord/<project>/`（非项目目录）
 - **子会话内联**：子会话（subagent）内容合并到父会话的 Markdown 文件中
 - **文件锁**：`file-manager.ts` 使用 `withFileLock` 防止并发写入同一文件
-- **错误静默**：所有事件处理（`session.idle`/`deleted`/`compacted` 等）的错误都被 try-catch 静默吞掉，避免影响其他插件
+- **错误静默**：所有事件处理（`session.idle`/`deleted`/`compaction.ended` 等）的错误都被 try-catch 静默吞掉，避免影响其他插件
 - **双重 debounce**：
   - 会话保存 debounce: 2000ms（`DEFAULT_CONFIG.debounceMs`）
   - 视图再生 debounce: 10000ms（仅主会话触发，子会话不触发）
@@ -42,7 +42,8 @@ npm run typecheck # tsc --noEmit（严格模式）
 - **双主题**：视图默认暗色（`data-theme="dark"`，暖黑 + 柠檬黄 opencode 风格），导航栏按钮可切换浅色并持久化到 `localStorage['autorecord-theme']`；颜色集中在 CSS 变量（改主题只需改变量块）
 - **原子写入**：HTML 通过 `.tmp` 临时文件 + `rename` 原子替换；`projects/` 目录从项目扫描中排除（`PROJECTS_DIR`）
 - **残留清理**：每次视图再生成时对比 `projects/` 下的 `.html` 文件与当前项目列表，删除已不存在的项目对应页面（`cleanupStaleProjectPages`）
-- **过期自检（stale-guard）**：插件初始化时对自身 dist 计算代码指纹，写盘前节流复检（5s）；指纹不一致（开发期间重新 build）即粘性判定过期，所有写盘短路并通过 app.log 提示一次"重启 opencode"，防止运行中的旧逻辑覆盖新逻辑产出
+- **过期自检（stale-guard）**：插件初始化时对自身 dist 计算代码指纹，写盘前节流复检（5s）；指纹不一致（开发期间重新 build）即粘性判定过期，所有写盘短路并通过插件日志提示一次“重启 opencode”，防止运行中的旧逻辑覆盖新逻辑产出
+- **错误日志**：`serve --service` 守护模式下 stdout 为 `/dev/null`，console 输出会丢失；因此插件 warn/error 除 console 外同时追加写入 `~/.local/share/opencode/log/opencode-autorecord.log`（超 5MB 轮转为 `.old`），debug/info 仅走 console
 - **数据格式版本戳 + fail-closed**：md 会话块头部带 `<!-- AUTORECORD-SCHEMA: N -->`（`SCHEMA_VERSION`），解析到更高版本的块时拒绝覆盖；同一 id 重复块保留 schema 最高者。索引层同理：磁盘 index 的 `version`/`viewVersion` 高于本地认知时放弃再生与 saveIndex（`readStoredIndexVersions`）
 - **开发期目录隔离**：环境变量 `AUTORECORD_HOME` 重定向数据根目录，开发调试与真实数据物理隔离
 

@@ -8,6 +8,7 @@ const pluginRepoUrl: string = typeof pluginRepository?.url === 'string'
   ? pluginRepository.url.replace(/^git\+/, '').replace(/\.git$/, '')
   : '';
 import { INJECTED_CONTEXT_MARKER, TURN_SEPARATOR } from './types.js';
+import { logError } from './logger.js';
 import {
   saveIndex,
   updateFileIndex,
@@ -111,8 +112,8 @@ async function writeViewLog(logPath: string, message: string): Promise<void> {
     }
     await appendFile(logPath, line, 'utf-8');
   } catch {
-    // Fallback to console if log write fails
-    console.error('[autorecord-view] Log write failed:', line.trim());
+    // Fallback to plugin log if views log write fails
+    logError(`[autorecord-view] Log write failed: ${line.trim()}`);
   }
 }
 

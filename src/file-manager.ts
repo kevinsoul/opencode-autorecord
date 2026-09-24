@@ -2,6 +2,7 @@ import { mkdir, writeFile, readFile, rename, unlink } from 'node:fs/promises';
 import { join, dirname, basename, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import type { PluginConfig } from './types.js';
+import { logWarn, logError, errorText } from './logger.js';
 
 const INVALID_FILENAME_CHARS = /[/\\:*?"<>|]/g;
 const MULTIPLE_HYPHENS = /-+/g;
@@ -53,7 +54,7 @@ export async function ensureDirectory(
   try {
     await mkdir(dir, { recursive: true });
   } catch (error) {
-    console.error(`[autorecord] Failed to create directory ${dir}:`, error);
+    logError(`[autorecord] Failed to create directory ${dir}: ${errorText(error)}`);
   }
   return dir;
 }
@@ -199,7 +200,7 @@ export async function saveSessionToTopicFile(
         existingIdx >= 0 &&
         (blocks[existingIdx].schemaVersion ?? 1) > SCHEMA_VERSION
       ) {
-        console.warn(
+        logWarn(
           `[autorecord] Skipped session ${sessionId} in ${filePath}: block schema v${String(blocks[existingIdx].schemaVersion)} is newer than local v${SCHEMA_VERSION}`
         );
         return 'skipped-newer';
@@ -223,7 +224,7 @@ export async function saveSessionToTopicFile(
         await rename(tempPath, filePath);
         return 'saved';
       } catch (error) {
-        console.error(`[autorecord] Failed to write file ${filePath}:`, error);
+        logError(`[autorecord] Failed to write file ${filePath}: ${errorText(error)}`);
         try {
           await unlink(tempPath);
         } catch {
@@ -232,7 +233,7 @@ export async function saveSessionToTopicFile(
         return 'unchanged';
       }
     } catch (error) {
-      console.error(`[autorecord] Failed to save session to ${filePath}:`, error);
+      logError(`[autorecord] Failed to save session to ${filePath}: ${errorText(error)}`);
       return 'unchanged';
     }
   });
@@ -277,7 +278,7 @@ export async function saveImageFromBase64(
 
     return `images/${imageFilename}`;
   } catch (error) {
-    console.error('[autorecord] Failed to save image:', error);
+    logError(`[autorecord] Failed to save image: ${errorText(error)}`);
     return null;
   }
 }
@@ -313,9 +314,8 @@ export async function ensureGlobalDirectory(
     await mkdir(globalSaveDir, { recursive: true });
     return globalSaveDir;
   } catch (error) {
-    console.error(
-      `[autorecord] Failed to create global directory ${globalSaveDir}:`,
-      error
+    logError(
+      `[autorecord] Failed to create global directory ${globalSaveDir}: ${errorText(error)}`
     );
     return null;
   }
@@ -345,6 +345,6 @@ export async function saveImageToSecondaryLocation(
     const buffer = Buffer.from(extracted.data, 'base64');
     await writeFile(imagePath, buffer);
   } catch (error) {
-    console.error('[autorecord] Failed to save image to secondary location:', error);
+    logError(`[autorecord] Failed to save image to secondary location: ${errorText(error)}`);
   }
 }

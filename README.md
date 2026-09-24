@@ -51,11 +51,11 @@
 
 ```json
 {
-  "plugin": ["opencode-autorecord"]
+  "plugins": ["opencode-autorecord"]
 }
 ```
 
-OpenCode installs npm plugins automatically using Bun at startup, and caches packages and their dependencies in `~/.cache/opencode/node_modules/`. See the [official documentation](https://opencode.ai/docs/plugins/#how-plugins-are-installed) for details. / OpenCode 启动时会自动使用 Bun 安装 npm 插件，包及其依赖缓存于 `~/.cache/opencode/node_modules/`。详见[官方文档](https://opencode.ai/docs/plugins/#how-plugins-are-installed)。
+OpenCode installs npm plugins automatically at startup and caches packages and their dependencies. See the [official V2 plugin documentation](https://opencode.ai/v2/docs/build/plugins) for details. / OpenCode 启动时会自动安装 npm 插件并缓存包及其依赖。详见 [OpenCode V2 插件文档](https://opencode.ai/v2/docs/build/plugins)。
 
 Configuration file locations (in order of priority): / 配置文件位置（按优先级排序）：
 

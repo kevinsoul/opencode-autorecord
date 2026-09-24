@@ -174,9 +174,9 @@ Session: {title}
 | 事件 | 行为 |
 |------|------|
 | `session.idle` | 触发 debounce 保存 |
-| `message.part.updated` | 触发 debounce 保存 |
+| `session.step.streamed` / `session.step.ended` | 触发 debounce 保存 |
 | `session.deleted` | 立即保存后删除会话记录 |
-| `session.compacted` | 取消 debounce，立即保存 |
+| `session.compaction.ended` | 取消 debounce，立即保存 |
 
 ### Debounce 规则
 
