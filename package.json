@@ -12,7 +12,8 @@
         }
     },
     "files": [
-        "dist"
+        "dist",
+        "index.js"
     ],
     "bin": {
         "opencode-autorecord": "dist/cli.js"
@@ -42,8 +43,8 @@
         "url": "https://github.com/kevinsoul/opencode-autorecord/issues"
     },
     "dependencies": {
-        "@opencode-ai/plugin": "^1.18.18",
-        "@opencode-ai/sdk": "^1.18.18"
+        "@opencode/client": "2.0.15",
+        "@opencode/plugin": "2.0.15"
     },
     "devDependencies": {
         "@types/node": "^22.0.0",

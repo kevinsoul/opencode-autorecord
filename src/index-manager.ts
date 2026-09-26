@@ -3,14 +3,64 @@ import { join } from 'node:path';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+export interface BlockUsage {
+  providerID?: string;
+  modelID?: string;
+  input?: number;
+  output?: number;
+  reasoning?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  cost?: number;
+  durationMs?: number;
+  finish?: string;
+  error?: string;
+  compaction?: boolean;
+}
+
 export interface ConversationBlock {
-  type: 'message' | 'tool';
+  /** child-session：subagent 子会话容器块（formatter 的 `### 📦 Subagent:` 段落） */
+  type: 'message' | 'tool' | 'child-session';
   timestamp: string;
   content?: string;
+  /** 消息角色（message 块）；旧索引缓存无此字段，渲染端按序推断 */
+  role?: 'user' | 'assistant';
+  /** 所属轮次（session block 内 1 起编号）；undefined 表示任何轮次开始之前的内容（如压缩摘要前置上下文） */
+  turn?: number;
+  /** 同一条 Assistant 消息内的所有 block 共享同一 id；渲染端据此聚合为步骤组。旧缓存无此字段时渲染降级为平铺 */
+  stepId?: number;
+  /** 步骤标签：markdown 标题后缀优先，缺省时按 reasoning > tool > text 推导（与 formatter getAssistantTag 一致） */
+  stepTag?: '分析过程' | '执行过程' | '回复内容';
+  /** assistant 文本块细分：💭 Reasoning 开头为 reasoning，其余为 reply */
+  kind?: 'reasoning' | 'reply';
   toolName?: string;
   toolStatus?: string;
   toolInput?: string;
   toolOutput?: string;
+  /** Assistant message usage metadata (message blocks only) */
+  usage?: BlockUsage;
+  /** 子会话标题（type='child-session' 时存在，来自 `### 📦 Subagent: <title>`） */
+  childTitle?: string;
+  /** 子会话开始时间（formatter 写入的 `*Started: …*` 行） */
+  childTimestamp?: string;
+  /** 子会话内部消息流（user/assistant 块，复用主对话 block 结构；子会话无轮次概念） */
+  children?: ConversationBlock[];
+}
+
+export interface SessionUsageRow {
+  calls: number;
+  input: number;
+  output: number;
+  reasoning: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cost: number;
+}
+
+export interface SessionStats {
+  byModel: Record<string, SessionUsageRow>;
+  totalCost: number;
+  totalTokens: number;
 }
 
 export interface SessionInfo {
@@ -20,6 +70,8 @@ export interface SessionInfo {
   category: string;
   filename: string;
   conversationBlocks?: ConversationBlock[];
+  /** Aggregated token/cost statistics parsed from the markdown header */
+  stats?: SessionStats;
 }
 
 export interface ProjectData {
@@ -44,6 +96,11 @@ interface ProjectMetaEntry {
 export interface PrimaryIndex {
   version: number;
   lastFullScan: number;
+  /**
+   * 视图渲染结构版本（view-generator.ts 中 VIEW_VERSION）。
+   * 与代码不一致时强制重建全部项目页（用于 HTML 渲染结构升级后的存量刷新）。
+   */
+  viewVersion?: number;
   projects: Record<string, ProjectMetaEntry>;
 }
 
@@ -63,11 +120,33 @@ export type AutorecordIndex = UnifiedIndex;
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-// v3: conversationBlocks 解析格式变更（step-start/step-finish 标记不再写入，
-// 日期正则锚定行首），旧缓存作废强制全量重扫
-const INDEX_VERSION = 3;
+// v4: 新增 usage 统计（📊 元数据行 + 文件头用量表），旧缓存作废强制全量重扫
+// v5: ConversationBlock 新增 role/turn（按用户提问分轮次），旧缓存作废强制全量重扫
+export const INDEX_VERSION = 6;
 const PRIMARY_INDEX_FILENAME = '.autorecord-index.json';
 const SECONDARY_INDEX_FILENAME = '.project-index.json';
+
+export interface StoredIndexVersions {
+  primaryIndexVersion?: number;
+  viewVersion?: number;
+}
+
+/**
+ * 读取磁盘上主索引的版本信息（不迁移、不修复、不写入）。
+ * 用于写入前检测索引是否由更高版本的代码产生，防止旧代码降级覆盖新格式索引。
+ */
+export async function readStoredIndexVersions(baseDir: string): Promise<StoredIndexVersions> {
+  try {
+    const content = await readFile(join(baseDir, PRIMARY_INDEX_FILENAME), 'utf-8');
+    const raw = JSON.parse(content) as { version?: number; viewVersion?: number };
+    return {
+      primaryIndexVersion: typeof raw.version === 'number' ? raw.version : undefined,
+      viewVersion: typeof raw.viewVersion === 'number' ? raw.viewVersion : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
 
 // 生成的 HTML 页面统一存放的目录名（需要从项目扫描中排除）
 export const PROJECTS_DIR = 'projects';
@@ -511,7 +590,7 @@ export function convertIndexToProjects(index: UnifiedIndex): ProjectData[] {
         name: projectName,
         sessions,
         count: sessions.length,
-        lastModified: secondary.lastModified,
+        lastModified: latestSessionTimeMs(sessions) ?? secondary.lastModified,
       });
     }
   }
@@ -520,6 +599,18 @@ export function convertIndexToProjects(index: UnifiedIndex): ProjectData[] {
   projects.sort((a, b) => b.lastModified - a.lastModified);
 
   return projects;
+}
+
+export function latestSessionTimeMs(sessions: SessionInfo[]): number | null {
+  let latest: number | null = null;
+  for (const s of sessions) {
+    const d = new Date(s.date);
+    if (isNaN(d.getTime())) continue;
+    if (latest === null || d.getTime() > latest) {
+      latest = d.getTime();
+    }
+  }
+  return latest;
 }
 
 function parseDate(dateStr: string): Date {

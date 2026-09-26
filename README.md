@@ -35,6 +35,13 @@
    - Dual-tier HTML views: `opencode-overview.html` (metadata only) + `projects/<project>.html` (full conversations) / 双级 HTML 视图：主索引页（仅元数据）+ 各项目页（完整对话）
    - Stale project pages auto-removed on regeneration / 残留项目页面在视图再生成时自动清理
 
+11. **Usage metadata & trajectory enrichment** (A1-A4) / **用量元数据与轨迹增强**（A1-A4）：
+    - Per-message model / token usage (input, output, reasoning, cache read/write) / cost and duration recorded for every assistant message (`📊 key=value` line in Markdown) / 每条助手消息记录模型、token 用量（输入/输出/推理/缓存读写）、成本与耗时（Markdown 中为 `📊 key=value` 元数据行）
+    - Typed finish reasons: normal vs truncated (`max-tokens`) vs interrupted/failed, with warning blocks in Markdown and colored badges in HTML / 类型化结束原因：区分正常结束、输出截断（max-tokens）与中断/失败，Markdown 输出警告块，HTML 显示彩色徽章
+    - Compaction boundary marker: compaction summary messages are tagged (`📦 Compaction Summary`) / 压缩边界标记：压缩摘要消息带 `📦 Compaction Summary` 标签
+    - Injected context distinction: system-injected text parts are marked as `[系统注入上下文 / Injected Context]`, separating real user input from context injection / 注入上下文区分：系统注入的文本片段标注 `[系统注入上下文]`，与真人输入区分
+    - Session-level usage table at the top of each Markdown file + session cost/token stats bar and per-message badges in the HTML detail modal / Markdown 文件头新增会话级用量统计表；HTML 会话详情弹窗顶部显示成本/token 统计条，消息块显示用量徽章
+
 
 ## Installation / 安装
 
@@ -44,11 +51,11 @@
 
 ```json
 {
-  "plugin": ["opencode-autorecord"]
+  "plugins": ["opencode-autorecord"]
 }
 ```
 
-OpenCode installs npm plugins automatically using Bun at startup, and caches packages and their dependencies in `~/.cache/opencode/node_modules/`. See the [official documentation](https://opencode.ai/docs/plugins/#how-plugins-are-installed) for details. / OpenCode 启动时会自动使用 Bun 安装 npm 插件，包及其依赖缓存于 `~/.cache/opencode/node_modules/`。详见[官方文档](https://opencode.ai/docs/plugins/#how-plugins-are-installed)。
+OpenCode installs npm plugins automatically at startup and caches packages and their dependencies. See the [official V2 plugin documentation](https://opencode.ai/v2/docs/build/plugins) for details. / OpenCode 启动时会自动安装 npm 插件并缓存包及其依赖。详见 [OpenCode V2 插件文档](https://opencode.ai/v2/docs/build/plugins)。
 
 Configuration file locations (in order of priority): / 配置文件位置（按优先级排序）：
 
@@ -144,8 +151,25 @@ npx opencode-autorecord regenerate ~/opencode-autorecord
 # Regenerate views (pass the root of the global save directory) / 重新生成视图（传入全局保存目录的根路径）
 opencode-autorecord regenerate ~/opencode-autorecord
 ```
-
 > **Windows users**: `~` is not expanded on Windows — use a full path like `C:\Users\<username>\opencode-autorecord` instead. See [Platform Notes](#platform-notes--平台说明). / **Windows 用户**：Windows 下 `~` 不会展开，请使用完整路径如 `C:\Users\<用户名>\opencode-autorecord`，详见[平台说明](#platform-notes--平台说明)。
+
+
+## Advanced / 进阶
+
+### Custom data directory / 自定义数据目录（`AUTORECORD_HOME`）
+
+Set the `AUTORECORD_HOME` environment variable to redirect the data root (defaults to `~/opencode-autorecord`). Useful for development/testing — plugin writes stay physically isolated from your real data. / 设置环境变量 `AUTORECORD_HOME` 可重定向数据根目录（默认 `~/opencode-autorecord`）。适用于开发调试场景——插件写入与真实数据物理隔离：
+
+```bash
+AUTORECORD_HOME=/tmp/ar-dev opencode
+```
+
+The CLI reads the same variable as a fallback for its directory argument, so `opencode-autorecord regenerate` without arguments targets the isolated directory too. / CLI 的目录参数缺省时同样读取该变量，便于对隔离目录执行 regenerate。
+
+### Data safety during development / 开发期的数据安全机制
+
+- **Stale self-check**: on startup the plugin fingerprints its own build output; if the fingerprint changes while running (e.g. you rebuilt during development), all disk writes are disabled until opencode restarts / **过期自检**：插件启动时对自身构建产物计算指纹；运行期间产物被重新构建（如开发中重新 build）后，所有写盘操作自动禁用，直到重启 opencode
+- **Schema versioning**: every session block is stamped with a schema version; blocks written by a newer version are never overwritten by older logic (fail-closed), and the same applies to index/view versions / **格式版本戳**：会话块与索引均带版本戳，旧逻辑遇到更高版本的数据会拒绝覆盖（fail-closed）
 
 
 ## Platform Notes / 平台说明

@@ -6,7 +6,7 @@ export default defineConfig({
   dts: true,
   clean: true,
   sourcemap: true,
-  external: ['@opencode-ai/plugin', '@opencode-ai/sdk'],
+  external: ['@opencode/client', '@opencode/plugin'],
   treeshake: true,
   minify: false,
 });

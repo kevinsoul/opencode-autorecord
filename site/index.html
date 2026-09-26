@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="zh" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>opencode-autorecord — The dashcam for OpenCode</title>
+<meta name="description" content="An OpenCode plugin that quietly archives every session to clean Markdown, with images extracted, subagents inlined, and two-tier HTML views generated.">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 28 40'%3E%3Crect x='0' y='0' width='8' height='40' fill='%23CFCECD'/%3E%3Crect x='20' y='0' width='8' height='40' fill='%23656363'/%3E%3Crect x='8' y='16' width='12' height='8' fill='%23656363'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<!-- ============ Header ============ -->
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="brand" href="#top" aria-label="opencode-autorecord home">
+      <svg class="brand-mark" width="21" height="30" viewBox="0 0 28 40" aria-hidden="true">
+        <rect x="0" y="0" width="8" height="40" fill="var(--logo-light)"/>
+        <rect x="20" y="0" width="8" height="40" fill="var(--logo-dark)"/>
+        <rect x="8" y="16" width="12" height="8" fill="var(--logo-dark)"/>
+      </svg>
+      <span class="brand-name">opencode-autorecord</span>
+    </a>
+    <nav class="header-nav" aria-label="Primary">
+      <a href="#features" data-i18n="nav.features">Features</a>
+      <a href="#storage" data-i18n="nav.storage">Storage</a>
+      <a href="#usage" data-i18n="nav.usage">Usage</a>
+      <a href="#faq" data-i18n="nav.faq">FAQ</a>
+      <a class="header-link-github" href="https://github.com/kevinsoul/opencode-autorecord" target="_blank" rel="noopener">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.55 0-.27-.01-1.17-.02-2.12-3.2.7-3.87-1.36-3.87-1.36-.52-1.33-1.28-1.68-1.28-1.68-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.19 1.76 1.19 1.03 1.75 2.69 1.25 3.34.95.1-.74.4-1.25.72-1.54-2.55-.29-5.23-1.28-5.23-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.41-2.69 5.38-5.25 5.67.41.35.77 1.05.77 2.12 0 1.53-.01 2.76-.01 3.14 0 .3.2.66.8.55A11.5 11.5 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z"/></svg>
+        <span data-i18n="nav.github">GitHub</span>
+      </a>
+    </nav>
+    <div class="header-actions">
+      <button class="lang-toggle" id="lang-toggle" type="button" aria-label="Switch language">
+        <span class="lang-zh" data-i18n="lang.zh">中文</span>
+      </button>
+      <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Toggle theme">
+        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="4.5"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.6 4.6l1.8 1.8M17.6 17.6l1.8 1.8M4.6 19.4l1.8-1.8M17.6 6.4l1.8-1.8"/>
+        </svg>
+        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+
+  <!-- ============ Hero ============ -->
+  <section class="hero">
+    <div class="container">
+      <p class="hero-badge" data-i18n="hero.badge">Free &amp; open source · OpenCode plugin</p>
+      <h1 class="hero-title">
+        <span data-i18n="hero.title.1">The dashcam for</span>
+        <span class="accent" data-i18n="hero.title.2">OpenCode</span>
+      </h1>
+      <p class="hero-sub" data-i18n="hero.sub">
+        An OpenCode plugin that quietly archives every session to clean Markdown —
+        images extracted, subagents inlined, HTML views generated. One line of config, zero noise.
+      </p>
+
+      <div class="hero-code" data-reveal>
+        <div class="code-tabs" role="tablist" aria-label="Install options">
+          <button class="code-tab active" data-tab="config" role="tab" aria-selected="true" data-i18n="code.config">opencode.json</button>
+          <button class="code-tab" data-tab="cli" role="tab" aria-selected="false" data-i18n="code.cli">CLI</button>
+        </div>
+        <div class="code-pane active" data-pane="config">
+          <div class="code-head">
+            <span class="code-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="code-path">~/.config/opencode/opencode.json</span>
+            <button class="copy-btn" type="button" data-copy='{"plugin": ["opencode-autorecord"]}' data-i18n-copy="code.copy">Copy</button>
+          </div>
+          <pre><code><span class="c-k">"plugin"</span><span class="c-p">: [</span><span class="c-s">"opencode-autorecord"</span><span class="c-p">]</span></code></pre>
+        </div>
+        <div class="code-pane" data-pane="cli">
+          <div class="code-head">
+            <span class="code-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="code-path">terminal</span>
+            <button class="copy-btn" type="button" data-copy="npx opencode-autorecord regenerate ~/opencode-autorecord" data-i18n-copy="code.copy">Copy</button>
+          </div>
+          <pre><code><span class="c-t">npx</span> opencode-autorecord regenerate ~/opencode-autorecord</code></pre>
+        </div>
+      </div>
+
+      <div class="hero-terminal" data-reveal aria-hidden="true">
+        <div class="terminal-bar">
+          <span class="terminal-title">session recording</span>
+          <span class="terminal-dot rec"></span>
+        </div>
+        <div class="terminal-body" id="terminal-body"><span class="terminal-caret"></span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ Numbers ============ -->
+  <section class="numbers" data-reveal>
+    <div class="container numbers-grid">
+      <div class="number-item">
+        <span class="number-value" data-i18n="numbers.config.value">1</span>
+        <span class="number-unit" data-i18n="numbers.config.unit">line of config</span>
+        <span class="number-label" data-i18n="numbers.config.label">zero dependencies to manage</span>
+      </div>
+      <div class="number-item">
+        <span class="number-value" data-i18n="numbers.local.value">100%</span>
+        <span class="number-unit" data-i18n="numbers.local.unit">local</span>
+        <span class="number-label" data-i18n="numbers.local.label">stored in your home directory</span>
+      </div>
+      <div class="number-item">
+        <span class="number-value" data-i18n="numbers.views.value">2</span>
+        <span class="number-unit" data-i18n="numbers.views.unit">HTML views</span>
+        <span class="number-label" data-i18n="numbers.views.label">metadata index + full pages</span>
+      </div>
+      <div class="number-item">
+        <span class="number-value" data-i18n="numbers.license.value">A2</span>
+        <span class="number-unit" data-i18n="numbers.license.unit">license</span>
+        <span class="number-label" data-i18n="numbers.license.label">Apache 2.0, free forever</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ Features ============ -->
+  <section class="section" id="features">
+    <div class="container">
+      <h2 class="section-title" data-i18n="features.title">What it does</h2>
+      <p class="section-sub" data-i18n="features.sub">Everything happens in the background — you just keep coding.</p>
+      <div class="features-grid">
+        <article class="feature-card" data-reveal>
+          <div class="feature-icon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/></svg>
+          </div>
+          <h3 data-i18n="features.idle.title">Auto-save on idle</h3>
+          <p data-i18n="features.idle.desc">Sessions are saved 2 seconds after going idle — silently, with no console output. Deleted or compacted sessions are flushed immediately.</p>
+        </article>
+        <article class="feature-card" data-reveal>
+          <div class="feature-icon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21c-4-2-7-5.5-7-10a7 7 0 1 1 14 0c0 4.5-3 8-7 10Z"/><path d="M9.5 11.5h1.5l1-2 1.5 3.5 1-1.5h1"/></svg>
+          </div>
+          <h3 data-i18n="features.subagent.title">Subagent inlining</h3>
+          <p data-i18n="features.subagent.desc">Child sessions (subagent tasks) are merged into the parent session's Markdown file — no scattered files, one complete record per conversation.</p>
+        </article>
+        <article class="feature-card" data-reveal>
+          <div class="feature-icon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="12" r="2.5"/><path d="m12 12 9-4"/><path d="M14.5 15.5 21 12"/></svg>
+          </div>
+          <h3 data-i18n="features.images.title">Images as files</h3>
+          <p data-i18n="features.images.desc">Base64 images are extracted and saved as standalone files with local paths — your Markdown stays clean and readable.</p>
+        </article>
+        <article class="feature-card" data-reveal>
+          <div class="feature-icon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5M4 12h16M4 5h13l3 3v11"/><path d="M9 19h12"/></svg>
+          </div>
+          <h3 data-i18n="features.views.title">Two-tier HTML views</h3>
+          <p data-i18n="features.views.desc">A metadata-only index page links to per-project pages with full conversations — dark code blocks, language labels, copy buttons, session modals.</p>
+        </article>
+        <article class="feature-card" data-reveal>
+          <div class="feature-icon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8Z"/></svg>
+          </div>
+          <h3 data-i18n="features.index.title">Incremental indexing</h3>
+          <p data-i18n="features.index.desc">A two-level index system (global + per-project) compares mtime and size — only changed projects are re-parsed, so regeneration is fast.</p>
+        </article>
+        <article class="feature-card" data-reveal>
+          <div class="feature-icon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></svg>
+          </div>
+          <h3 data-i18n="features.safety.title">Error isolation</h3>
+          <p data-i18n="features.safety.desc">Every event error is caught and swallowed so the plugin never affects your other plugins. File locks prevent concurrent writes.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ Storage ============ -->
+  <section class="section section-alt" id="storage">
+    <div class="container split">
+      <div class="split-text">
+        <h2 class="section-title" data-i18n="storage.title">One clean home for everything</h2>
+        <p data-i18n="storage.desc.1">Records live in <code>~/opencode-autorecord/</code> — never in your project directory, never polluting your git history.</p>
+        <p data-i18n="storage.desc.2">Files are named by timestamp and topic: <code>YYYYMMDD-HH-MM-SS-topic.md</code>. Full tool calls (inputs and outputs), reasoning steps, and Chinese/Unicode content are preserved.</p>
+        <ul class="check-list">
+          <li data-i18n="storage.check.1">Centralized storage outside project directories</li>
+          <li data-i18n="storage.check.2">Every conversation becomes a plain-text Markdown file</li>
+          <li data-i18n="storage.check.3">Stale HTML pages cleaned automatically on regeneration</li>
+        </ul>
+      </div>
+      <div class="split-code" data-reveal>
+        <div class="code-head">
+          <span class="code-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="code-path">~/opencode-autorecord/</span>
+        </div>
+        <pre class="tree"><code><span class="t-dir">~/opencode-autorecord/</span>
+├── <span class="t-dir">projects/</span>
+│   └── <span class="t-file">my-project.html</span>          <span class="t-com"># full conversations</span>
+├── <span class="t-file">opencode-overview.html</span>     <span class="t-com"># metadata index</span>
+├── <span class="t-file">.autorecord-index.json</span>     <span class="t-com"># global index (v2)</span>
+└── <span class="t-dir">my-project/</span>
+    ├── <span class="t-dir">images/</span>
+    │   └── <span class="t-file">20250129-10-30-45-topic-0.png</span>
+    └── <span class="t-file">20250129-10-30-45-implement-auth.md</span></code></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ Preview ============ -->
+  <section class="section" id="preview">
+    <div class="container">
+      <h2 class="section-title" data-i18n="preview.title">See it in action</h2>
+      <p class="section-sub" data-i18n="preview.sub">Every session becomes a browsable record — click any session to open the full conversation.</p>
+      <figure class="preview-main" data-reveal>
+        <div class="code-head">
+          <span class="code-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="code-path">session detail modal</span>
+        </div>
+        <img src="assets/screenshots/demo.gif" alt="Session detail modal" loading="lazy">
+      </figure>
+      <div class="preview-grid">
+        <figure class="preview-card" data-reveal>
+          <div class="code-head">
+            <span class="code-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="code-path">projects/chat-app.html</span>
+          </div>
+          <img src="assets/screenshots/3-project-full.png" alt="Project page with full conversation" loading="lazy">
+        </figure>
+        <figure class="preview-card" data-reveal>
+          <div class="code-head">
+            <span class="code-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="code-path">opencode-overview.html</span>
+          </div>
+          <img src="assets/screenshots/2-overview-top.png" alt="Overview page with project cards" loading="lazy">
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ Usage ============ -->
+  <section class="section" id="usage">
+    <div class="container">
+      <h2 class="section-title" data-i18n="usage.title">Get started in one line</h2>
+      <p class="section-sub" data-i18n="usage.sub">No manual installation. OpenCode installs npm plugins automatically with Bun at startup.</p>
+      <div class="steps">
+        <div class="step" data-reveal>
+          <span class="step-num">01</span>
+          <h3 data-i18n="usage.step1.title">Add the plugin</h3>
+          <p data-i18n="usage.step1.desc">Add one line to your project or user config. User-level config covers every project.</p>
+          <pre class="step-code"><code>{ <span class="c-s">"plugin"</span><span class="c-p">: [</span><span class="c-s">"opencode-autorecord"</span><span class="c-p">]</span> }</code></pre>
+        </div>
+        <div class="step" data-reveal>
+          <span class="step-num">02</span>
+          <h3 data-i18n="usage.step2.title">Start a conversation</h3>
+          <p data-i18n="usage.step2.desc">A file is created the moment a new conversation starts. Every idle event snapshots the full session.</p>
+          <pre class="step-code"><code><span class="c-t">~/opencode-autorecord</span>/my-project/<span class="c-t">20260818-14-22-30-fix-bug.md</span></code></pre>
+        </div>
+        <div class="step" data-reveal>
+          <span class="step-num">03</span>
+          <h3 data-i18n="usage.step3.title">Browse the records</h3>
+          <p data-i18n="usage.step3.desc">Open the Markdown files, or regenerate the two-tier HTML views with one CLI command.</p>
+          <pre class="step-code"><code><span class="c-t">npx</span> opencode-autorecord regenerate ~/opencode-autorecord</code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ FAQ ============ -->
+  <section class="section section-alt" id="faq">
+    <div class="container narrow">
+      <h2 class="section-title" data-i18n="faq.title">FAQ</h2>
+      <div class="faq-list" id="faq-list">
+        <details class="faq-item">
+          <summary data-i18n="faq.q1">Do I need to install it first?</summary>
+          <p data-i18n="faq.a1">No. Once the plugin is listed in your <code>opencode.json</code>, OpenCode installs it automatically using Bun at startup (cached in <code>~/.cache/opencode/node_modules/</code>).</p>
+        </details>
+        <details class="faq-item">
+          <summary data-i18n="faq.q2">Where are sessions saved?</summary>
+          <p data-i18n="faq.a2">In <code>~/opencode-autorecord/&lt;project-name&gt;/</code> — one folder per project, kept outside the project itself so your repo stays untouched.</p>
+        </details>
+        <details class="faq-item">
+          <summary data-i18n="faq.q3">When does the plugin save?</summary>
+          <p data-i18n="faq.a3">On session idle after a 2s debounce, and immediately when a session is deleted or compacted. A message cache avoids re-fetching full history on every idle event.</p>
+        </details>
+        <details class="faq-item">
+          <summary data-i18n="faq.q4">How are images handled?</summary>
+          <p data-i18n="faq.a4">Base64 images are extracted in parallel and saved as standalone files under an <code>images/</code> directory, then replaced with local paths in the Markdown — keeping the files clean.</p>
+        </details>
+        <details class="faq-item">
+          <summary data-i18n="faq.q5">Where do subagent sessions appear?</summary>
+          <p data-i18n="faq.a5">Child sessions are inlined inside the parent session's Markdown file under a "Child Sessions" section. They never create separate files.</p>
+        </details>
+        <details class="faq-item">
+          <summary data-i18n="faq.q6">Will it affect my other plugins?</summary>
+          <p data-i18n="faq.a6">No. All event-handling errors are caught and swallowed, file writes are protected by locks, and debounces keep IO minimal — the plugin is designed to be invisible.</p>
+        </details>
+        <details class="faq-item">
+          <summary data-i18n="faq.q7">Is the HTML view live?</summary>
+          <p data-i18n="faq.a7">Views regenerate automatically (10s debounce on the main session) and you can also regenerate manually anytime with <code>opencode-autorecord regenerate ~/opencode-autorecord</code>.</p>
+        </details>
+        <details class="faq-item">
+          <summary data-i18n="faq.q8">Are there Windows differences?</summary>
+          <p data-i18n="faq.a8">On Windows, <code>~</code> is NOT expanded in CLI paths — pass a full path like <code>C:\Users\&lt;username&gt;\opencode-autorecord</code>. User config lives at <code>%USERPROFILE%\.config\opencode\opencode.json</code>. Illegal filename characters (<code>\ / : * ? " &lt; &gt; |</code>) are auto-replaced with <code>-</code>, but reserved device names (<code>CON</code>, <code>NUL</code>, <code>COM1</code>, …) can't be used as filenames. OpenCode officially recommends running in WSL for the best experience.</p>
+        </details>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<!-- ============ Footer ============ -->
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <div class="footer-brand">
+      <a class="brand" href="#top">
+        <svg class="brand-mark" width="18" height="26" viewBox="0 0 28 40" aria-hidden="true">
+          <rect x="0" y="0" width="8" height="40" fill="var(--logo-light)"/>
+          <rect x="20" y="0" width="8" height="40" fill="var(--logo-dark)"/>
+          <rect x="8" y="16" width="12" height="8" fill="var(--logo-dark)"/>
+        </svg>
+        <span class="brand-name">opencode-autorecord</span>
+      </a>
+      <p class="footer-tag" data-i18n="footer.tag">The dashcam for OpenCode</p>
+    </div>
+    <nav class="footer-links" aria-label="Footer">
+      <a href="http://www.claode.cn" target="_blank" rel="noopener" data-i18n="footer.site">官网</a>
+      <a href="https://github.com/kevinsoul/opencode-autorecord" target="_blank" rel="noopener" data-i18n="footer.github">GitHub</a>
+      <a href="https://www.npmjs.com/package/opencode-autorecord" target="_blank" rel="noopener" data-i18n="footer.npm">npm</a>
+      <a href="#faq" data-i18n="footer.faq">FAQ</a>
+      <a href="https://github.com/kevinsoul/opencode-autorecord/blob/main/LICENSE" target="_blank" rel="noopener" data-i18n="footer.license">Apache 2.0</a>
+    </nav>
+  </div>
+  <div class="container footer-bottom">
+    <span>© 2026 <span data-i18n="footer.rights">opencode-autorecord contributors</span></span>
+    <span class="footer-inspiration" data-i18n="footer.inspiration">Inspired by the OpenCode design language</span>
+  </div>
+</footer>
+
+<script src="assets/main.js"></script>
+</body>
+</html>
