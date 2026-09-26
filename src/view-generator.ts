@@ -1130,9 +1130,9 @@ const COMMON_CSS = `
       --shadow: 0 20px 60px hsla(0, 100%, 0%, 0.5);
       --card-shadow: 0 2px 12px hsla(0, 100%, 0%, 0.35);
       --hover-shadow: 0 12px 40px hsla(0, 100%, 0%, 0.45);
-      --grid-line: hsla(0, 30%, 90%, 0.028);
-      --grid-glow: hsla(62, 100%, 90%, 0.06);
-      --noise-opacity: 0.05;
+      --grid-line: hsla(0, 30%, 90%, 0.075);
+      --grid-glow: hsla(62, 100%, 90%, 0.16);
+      --noise-opacity: 0.07;
       --step-analysis-text: hsl(262, 85%, 78%);
       --step-execution-text: hsl(28, 95%, 66%);
       --step-reply-text: hsl(140, 55%, 58%);
@@ -1157,9 +1157,9 @@ const COMMON_CSS = `
       --shadow: 0 20px 60px hsla(0, 50%, 10%, 0.08);
       --card-shadow: 0 2px 12px hsla(0, 50%, 10%, 0.05);
       --hover-shadow: 0 12px 40px hsla(0, 50%, 10%, 0.10);
-      --grid-line: hsla(30, 6%, 20%, 0.05);
-      --grid-glow: hsla(62, 80%, 50%, 0.07);
-      --noise-opacity: 0.04;
+      --grid-line: hsla(30, 6%, 20%, 0.07);
+      --grid-glow: hsla(62, 80%, 50%, 0.13);
+      --noise-opacity: 0.05;
       --step-analysis-text: #6941C6;
       --step-execution-text: #B54708;
       --step-reply-text: #1F9D41;
@@ -1182,8 +1182,8 @@ const COMMON_CSS = `
       z-index: -1;
       pointer-events: none;
       background:
-        radial-gradient(ellipse 62% 46% at 50% -8%, var(--grid-glow), transparent 68%),
-        radial-gradient(ellipse 40% 34% at 88% 108%, var(--grid-glow), transparent 70%),
+        radial-gradient(ellipse 62% 46% at 50% 4%, var(--grid-glow), transparent 68%),
+        radial-gradient(ellipse 40% 34% at 86% 94%, var(--grid-glow), transparent 70%),
         linear-gradient(var(--grid-line) 1px, transparent 1px),
         linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
       background-size: auto, auto, 44px 44px, 44px 44px;
@@ -1301,7 +1301,10 @@ const COMMON_CSS = `
     }
     .sidebar {
       position: sticky; top: calc(var(--nav-height) + 24px);
-      background: var(--surface); border: 1px solid var(--border-weak);
+      background: color-mix(in srgb, var(--surface) 84%, transparent);
+      backdrop-filter: blur(8px) saturate(140%);
+      -webkit-backdrop-filter: blur(8px) saturate(140%);
+      border: 1px solid var(--border-weak);
       border-radius: 16px; padding: 14px 10px;
       box-shadow: var(--card-shadow);
       max-height: calc(100vh - var(--nav-height) - 48px); overflow-y: auto;
@@ -1333,7 +1336,9 @@ const COMMON_CSS = `
     /* ── 项目行式列表 ── */
     .projects-list {
       display: flex; flex-direction: column;
-      background: var(--surface);
+      background: color-mix(in srgb, var(--surface) 84%, transparent);
+      backdrop-filter: blur(8px) saturate(140%);
+      -webkit-backdrop-filter: blur(8px) saturate(140%);
       border: 1px solid var(--border-weak); border-radius: 18px;
       box-shadow: var(--card-shadow); overflow: hidden;
     }
@@ -2768,7 +2773,7 @@ async function ensureProjectDetail(
  * 两列目录树/subagent 子会话恢复、含结论的步骤组按 kind 切分出独立回复卡）时 +1，
  * regenerateViews 检测到不一致会强制重建全部项目页（存量页面刷新）。
  */
-const VIEW_VERSION = 9;
+const VIEW_VERSION = 10;
 
 /**
  * 再生成全部 HTML 视图。
