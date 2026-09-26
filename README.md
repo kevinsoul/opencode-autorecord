@@ -42,6 +42,13 @@
     - Injected context distinction: system-injected text parts are marked as `[系统注入上下文 / Injected Context]`, separating real user input from context injection / 注入上下文区分：系统注入的文本片段标注 `[系统注入上下文]`，与真人输入区分
     - Session-level usage table at the top of each Markdown file + session cost/token stats bar and per-message badges in the HTML detail modal / Markdown 文件头新增会话级用量统计表；HTML 会话详情弹窗顶部显示成本/token 统计条，消息块显示用量徽章
 
+12. **Migrated to the OpenCode V2 plugin API & record integrity safeguards** (v2.0.0) / **迁移至 OpenCode V2 插件 API 与记录完整性防护**（v2.0.0）：
+    - Plugin migrated to the OpenCode V2 plugin API; multi-instance archiving defects fixed / 插件迁移到 OpenCode V2 插件 API，修复多实例归档缺陷
+    - Dual-theme views: dark by default with a light toggle persisted to `localStorage` / 视图双主题：默认暗色，可切换浅色并持久化
+    - Two-column TOC in the session detail modal: session → turn → step group → subagent, with anchor navigation and a single-column fallback on mobile / 会话详情弹窗两列目录树：会话 → 轮次 → 步骤组 → 子会话，支持锚点定位，移动端退化为单列
+    - Stale self-check plus schema/index version stamps: older logic never overwrites newer data (fail-closed), and `AUTORECORD_HOME` isolates development data / 过期自检与格式版本戳：旧逻辑不会覆盖新版本数据（fail-closed），`AUTORECORD_HOME` 隔离开发期数据
+    - Homepage revamp: row-style project list, grid + glow + noise atmosphere layer, hero section, `VIEW_VERSION` bumped to force rebuilding existing pages / 主页视觉改版：项目列表行式化、网格+光晕+噪点氛围层、hero 区，`VIEW_VERSION` 升版强制重建存量页面
+
 
 ## Installation / 安装
 
