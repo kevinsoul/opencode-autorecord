@@ -49,6 +49,11 @@
     - Stale self-check plus schema/index version stamps: older logic never overwrites newer data (fail-closed), and `AUTORECORD_HOME` isolates development data / 过期自检与格式版本戳：旧逻辑不会覆盖新版本数据（fail-closed），`AUTORECORD_HOME` 隔离开发期数据
     - Homepage revamp: row-style project list, grid + glow + noise atmosphere layer, hero section, `VIEW_VERSION` bumped to force rebuilding existing pages / 主页视觉改版：项目列表行式化、网格+光晕+噪点氛围层、hero 区，`VIEW_VERSION` 升版强制重建存量页面
 
+13. **Markdown body rendering in the session detail modal** / **会话详情弹窗 Markdown 正文渲染**：
+    - Conversation text is rendered client-side with marked (GFM + breaks): headings, lists, tables, blockquotes, links and inline formatting display properly instead of raw characters / 对话正文由客户端 marked 渲染（GFM + breaks）：标题、列表、表格、引用、链接与行内格式正常显示，不再出现原始标记字符
+    - Fenced code blocks keep the built-in rendering (Prism highlighting + language label + copy button); `<details>` blocks are extracted structurally and their bodies are also Markdown-rendered / 围栏代码块仍走内置渲染（Prism 高亮 + 语言标签 + 复制按钮）；`<details>` 折叠块按结构摘出，块内正文同样按 Markdown 渲染
+    - Hardened output: only `<br>` raw HTML is allowed through, `javascript:`-style URLs are stripped from links/images (external links open in a new tab), and if marked fails to load or parse, rendering falls back to the previous plain-text mode / 输出加固：原始 HTML 仅放行 `<br>`，链接与图片屏蔽 `javascript:` 等危险协议（外链新窗口打开）；marked 加载失败或解析异常时自动降级为旧的纯文本渲染
+
 
 ## Installation / 安装
 
@@ -111,22 +116,23 @@ user-home/ / 用户目录/
 - UTF-8 support for Chinese and other Unicode content / 支持中文及其他 Unicode 内容
 - Two-tier HTML views: `opencode-overview.html` (metadata only) links to per-project pages in `projects/<project-name>.html` (full conversations with dark-themed code blocks, language labels, and copy buttons) / 双级 HTML 视图：主索引页（`opencode-overview.html`）仅含元数据，点击跳转到各项目页（`projects/<项目名>.html`）查看完整对话
 - Session detail modals: clicking a session card opens a fullscreen modal with dark code blocks, language labels, and copy buttons / 会话详情弹窗：项目页中点击会话卡片弹出全屏弹窗，深色代码块带语言标签和复制按钮，提升阅读体验
+- Markdown-rendered conversation text in the detail modal (headings, lists, tables, blockquotes, links), with sanitized HTML/URLs and a plain-text fallback when the Markdown library is unavailable / 详情弹窗内的对话正文按 Markdown 渲染（标题、列表、表格、引用、链接），输出经过 HTML/URL 消毒，Markdown 库不可用时自动降级为纯文本
 - Stale project pages are auto-removed on every view regeneration: pages in `projects/` whose project folders no longer exist are deleted (`cleanupStaleProjectPages`) / 残留页面清理：每次视图再生成时删除 `projects/` 中已不存在项目对应的 `.html` 页面
 
 
 ## Preview / 效果预览
 
-Main index page — project cards with session timeline / 主索引页——项目卡片与会话时间线：
+Main index page — overview with project cards / 主索引页——项目卡片概览：
 
-![overview](screenshots/1-overview-full.png)
+![overview](site/assets/screenshots/2-overview-top.png)
 
 Project page — full conversation with dark code blocks / 项目页——完整对话与深色代码块：
 
-![project](screenshots/3-project-full.png)
+![project](site/assets/screenshots/3-project-full.png)
 
 Session detail modal — click any session to browse the full record / 会话详情弹窗——点击任意会话查看完整记录：
 
-![modal](screenshots/4-session-modal.png)
+![modal](site/assets/screenshots/4-session-modal.png)
 
 
 ## CLI / CLI 命令行工具
