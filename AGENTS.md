@@ -37,6 +37,7 @@ npm run typecheck # tsc --noEmit（严格模式）
   - 视图再生 debounce: 10000ms（仅主会话触发，子会话不触发）
 - **图片处理**：base64 图片自动提取保存为独立文件，替换为本地路径
 - **双级 HTML 视图**：主索引页 `opencode-overview.html` 仅含元数据（避免文件无限膨胀），完整对话在 `projects/<项目名>.html` 中，会话详情弹窗 + 深色代码块（语言标签/复制按钮）
+- **Markdown 正文渲染**：项目页弹窗内对话正文由客户端 marked（CDN `marked.umd.min.js`，`gfm` + `breaks`）渲染成 HTML；围栏代码块仍走自有渲染（Prism 高亮 + 复制按钮），`<details>` 折叠块先按结构摘出、正文再单独走 Markdown（正文内 `<br>` 视作换行）；原始 HTML 仅放行 `<br>`（`allowMdHtml`），链接过滤 `javascript:` 等协议并 `target="_blank"`（`sanitizeMdUrls`），marked 未加载或解析失败时降级为旧的「转义 + 换行 + 行内代码」纯文本渲染（`formatPlainText`）；TOC/摘要标签用 `plainLabel` 剥离 Markdown 标记
 - **弹窗两列目录树**：会话详情弹窗为 grid 两列——左侧 sticky 目录树（会话段 → 轮次 → 步骤组 → 子会话，锚点 `sec-si` / `turn-tsi-gi` / `tsi-gig-ki` 由渲染序号生成），右侧对话内容；点击目录项自动展开父手风琴并滚动定位；≤768px 隐藏左栏退化单列；无对话数据的老会话加 `.no-toc` 退化为单列提示。步骤组内含正文时按块 kind 切分：首个 reply 块起独立为「💬 回复内容」结论卡（正文与 TOC 同步拆分，formatter 标题多标签化 `[分析过程] · [回复内容]`）
 - **子会话恢复**：formatter 写入的 `### 📦 Subagent:` 段落由解析层还原为 `child-session` 容器块（`childTitle`/`children` 字段，归属当前轮次），渲染为青色可折叠卡片；assistant 体提取逻辑抽为 `collectAssistantSection` 供主/子会话复用（围栏内字面量边界不误判）
 - **双主题**：视图默认暗色（`data-theme="dark"`，暖黑 + 柠檬黄 opencode 风格），导航栏按钮可切换浅色并持久化到 `localStorage['autorecord-theme']`；颜色集中在 CSS 变量（改主题只需改变量块）

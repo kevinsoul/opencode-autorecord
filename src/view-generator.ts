@@ -1512,7 +1512,35 @@ const DETAIL_CSS = `
     .conversation-block-role.assistant { color: var(--text-strong); }
     .conversation-block-role.tool { color: #FF9500; }
     .conversation-block-time { font-size: 13px; color: var(--text-weak); margin-left: auto; }
-    .conversation-block-content { font-size: 14px; line-height: 1.6; color: var(--text-strong); white-space: pre-wrap; }
+    .conversation-block-content { font-size: 14px; line-height: 1.7; color: var(--text-strong); white-space: normal; word-break: break-word; overflow-wrap: anywhere; }
+    /* ── Markdown 正文排版（标题/段落/列表/引用/表格/分隔线） ── */
+    .conversation-block-content > *:first-child { margin-top: 0; }
+    .conversation-block-content > *:last-child { margin-bottom: 0; }
+    .conversation-block-content p { margin: 0 0 10px; }
+    .conversation-block-content h1, .conversation-block-content h2, .conversation-block-content h3,
+    .conversation-block-content h4, .conversation-block-content h5, .conversation-block-content h6 {
+      font-family: var(--font-display); font-weight: 600; line-height: 1.35; color: var(--text-strong); margin: 18px 0 8px;
+    }
+    .conversation-block-content h1 { font-size: 20px; }
+    .conversation-block-content h2 { font-size: 18px; }
+    .conversation-block-content h3 { font-size: 16px; }
+    .conversation-block-content h4, .conversation-block-content h5, .conversation-block-content h6 { font-size: 14px; }
+    .conversation-block-content ul, .conversation-block-content ol { margin: 8px 0 12px; padding-left: 24px; }
+    .conversation-block-content li { margin: 4px 0; }
+    .conversation-block-content li > ul, .conversation-block-content li > ol { margin: 4px 0; }
+    .conversation-block-content li > p { margin: 0 0 6px; }
+    .conversation-block-content blockquote { margin: 12px 0; padding: 6px 14px; border-left: 3px solid var(--accent); background: var(--bg-weak); border-radius: 0 8px 8px 0; color: var(--text-weaker); }
+    .conversation-block-content blockquote > *:first-child { margin-top: 0; }
+    .conversation-block-content blockquote > *:last-child { margin-bottom: 0; }
+    .conversation-block-content hr { border: none; border-top: 1px solid var(--border-weak); margin: 16px 0; }
+    .conversation-block-content a { color: var(--accent); text-decoration: none; border-bottom: 1px solid transparent; transition: border-color 0.2s ease; }
+    .conversation-block-content a:hover { border-bottom-color: var(--accent); }
+    .conversation-block-content strong { font-weight: 600; color: var(--text-strong); }
+    .conversation-block-content del { color: var(--text-weak); }
+    .conversation-block-content table { width: max-content; max-width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; display: block; overflow-x: auto; }
+    .conversation-block-content th, .conversation-block-content td { border: 1px solid var(--border-weak); padding: 6px 10px; text-align: left; vertical-align: top; }
+    .conversation-block-content th { background: var(--bg-weak); font-weight: 600; white-space: nowrap; }
+    .conversation-block-content img { max-width: 100%; border-radius: 8px; }
     .conversation-block-content details { margin: 12px 0; background: var(--bg-weak); border: 1px solid var(--border-weak); border-radius: 8px; padding: 10px 16px; }
     .conversation-block-content summary { cursor: pointer; font-weight: 600; font-size: 13px; color: var(--text-weaker); user-select: none; margin-bottom: 4px; }
     .conversation-block-content summary:hover { color: var(--accent); }
@@ -1983,6 +2011,7 @@ export function buildProjectHtml(project: ProjectData): string {
   <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-markdown.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-css.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-markup.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/18.1.0/lib/marked.umd.min.js"></script>
   <style>
     ${COMMON_CSS}
     ${DETAIL_CSS}
@@ -2393,7 +2422,7 @@ export function buildProjectHtml(project: ProjectData): string {
         sec.forEach((group, gi) => {
           const firstUser = group.blocks.find(b => b.role === 'user' && b.content);
           const summarySource = (firstUser ? firstUser.content : '') || '';
-          const summaryLine = summarySource.split('\\n').map(l => l.trim()).find(l => l && l.indexOf(INJECTED_MARKER) !== 0) || '';
+          const summaryLine = plainLabel(summarySource.split('\\n').map(l => l.trim()).find(l => l && l.indexOf(INJECTED_MARKER) !== 0) || '');
           const shortSummary = summaryLine.length > 80 ? summaryLine.substring(0, 80) + '…' : (summaryLine || '(无文本)');
           const timeLabel = firstUser ? firstUser.timestamp : '';
           const isContext = group.key === 0;
@@ -2480,81 +2509,235 @@ export function buildProjectHtml(project: ProjectData): string {
       });
     }
 
-    function formatConversationContent(content) {
-      if (!content) return '';
-      const backtick = String.fromCharCode(96);
-      const tripleBacktick = backtick + backtick + backtick;
+    /** 折叠块占位前缀（formatConversationContent 摘出 details 时使用） */
+    const MD_DETAILS_PREFIX = 'AUTORECORD_DETAILS_BLOCK_';
+    const MD_BACKTICK = String.fromCharCode(96);
+    const MD_FENCE = MD_BACKTICK + MD_BACKTICK + MD_BACKTICK;
 
-      const parts = content.split(tripleBacktick);
-      const processedParts = [];
+    /** 仅放行 <br>（去掉属性），其余原始 HTML 转义为文本（防 XSS）；details/summary 由 formatConversationContent 统一处理 */
+    function allowMdHtml(token) {
+      const raw = typeof token === 'string' ? token : (token && token.text) || '';
+      if (!raw) return '';
+      return String(raw).replace(/<\\/?[a-zA-Z][^>]*>/g, function (tag) {
+        return /^<br\\b[^>]*\\/?>$/i.test(tag) ? '<br>' : escapeHtml(tag);
+      });
+    }
 
-      for (let i = 0; i < parts.length; i++) {
-        if (i % 2 === 0) {
-          // 保护 details 折叠块与 <br> 标签，避免被转义显示为原始文本
-          let text = parts[i]
-            .replace(/<details>/g, '\\u0001')
-            .replace(/<\\/details>/g, '\\u0002')
-            .replace(/<summary>/g, '\\u0003')
-            .replace(/<\\/summary>/g, '\\u0004')
-            .replace(/<br>/gi, '\\u0005');
-          text = escapeHtml(text);
-          const inlineParts = text.split(backtick);
-          for (let j = 1; j < inlineParts.length - 1; j += 2) {
-            if (j + 1 < inlineParts.length) {
-              inlineParts[j] = '<code>' + inlineParts[j] + '</code>';
-            }
-          }
-          text = inlineParts.join('');
-          text = text.split('\\n').join('<br>');
-          text = text
-            .split('\\u0001').join('<details>')
-            .split('\\u0002').join('</details>')
-            .split('\\u0003').join('<summary>')
-            .split('\\u0004').join('</summary>')
-            .split('\\u0005').join('<br>');
-          processedParts.push(text);
-        } else {
-          let code = parts[i];
-          let lang = '';
-          const newlineIdx = code.indexOf('\\n');
-          if (newlineIdx === 0) {
-            const nextNewline = code.indexOf('\\n', 1);
-            const firstLine = nextNewline > 0 ? code.substring(1, nextNewline).trim() : code.substring(1).trim();
-            if (firstLine && /^[a-zA-Z0-9\\-+_]+$/.test(firstLine) && firstLine.length <= 20) {
-              lang = firstLine.toLowerCase();
-              code = nextNewline > 0 ? code.substring(nextNewline + 1) : '';
-            }
-          } else if (newlineIdx > 0) {
-            const firstLine = code.substring(0, newlineIdx).trim();
-            if (firstLine && /^[a-zA-Z0-9\\-+_]+$/.test(firstLine) && firstLine.length <= 20) {
-              lang = firstLine.toLowerCase();
-              code = code.substring(newlineIdx + 1);
-            }
-          }
+    /** 屏蔽 javascript: 等危险协议，外链新窗口打开 */
+    function sanitizeMdUrls(html) {
+      const allow = /^(?:https?:\\/\\/|mailto:|#|\\.{0,2}\\/|data:image\\/)/;
+      return html
+        .replace(/href="([^"]*)"/g, function (_m, url) {
+          const probe = String(url).replace(/&amp;/g, '&').trim().toLowerCase();
+          return allow.test(probe) ? 'href="' + url + '" target="_blank" rel="noopener"' : 'href="#"';
+        })
+        .replace(/src="([^"]*)"/g, function (_m, url) {
+          const probe = String(url).replace(/&amp;/g, '&').trim().toLowerCase();
+          return allow.test(probe) ? 'src="' + url + '"' : 'src=""';
+        });
+    }
 
-          const langMap = {
-            'js': 'javascript', 'jsx': 'javascript',
-            'ts': 'typescript', 'tsx': 'typescript',
-            'sh': 'bash', 'shell': 'bash', 'zsh': 'bash',
-            'py': 'python', 'python3': 'python',
-            'yml': 'yaml',
-            'md': 'markdown',
-            'jsonc': 'json',
-          };
-          const prismLang = langMap[lang] || lang;
-          const langClass = prismLang ? 'language-' + prismLang : '';
-          const langLabel = lang || 'text';
+    /** Markdown → HTML；marked 未加载或解析失败时返回 null，由调用方降级为纯文本渲染 */
+    let mdConfigured = false;
+    function ensureMarkedConfigured() {
+      if (mdConfigured) return;
+      mdConfigured = true;
+      // 必须用 marked.use 合并 renderer（直接传 renderer 选项会让缺失的方法变为 undefined）
+      if (typeof marked !== 'undefined' && marked && typeof marked.use === 'function') {
+        marked.use({ gfm: true, breaks: true, renderer: { html: allowMdHtml } });
+      }
+    }
 
-          const escapedCode = escapeHtml(code);
-          const escapedLangLabel = escapeHtml(langLabel);
-          const escapedLangClass = escapeHtml(langClass);
-          const copyId = 'copy-' + Math.random().toString(36).substr(2, 9);
-          const headerHtml = '<div class="code-block-header"><span class="code-block-lang">' + escapedLangLabel + '</span><button class="code-block-copy" data-copy-id="' + copyId + '" onclick="copyCodeBlock(this)">复制</button></div>';
-          processedParts.push('<pre>' + headerHtml + '<code' + (escapedLangClass ? ' class="' + escapedLangClass + '"' : '') + ' id="' + copyId + '" data-raw-code="' + encodeURIComponent(code) + '"' + '>' + escapedCode + '</code></pre>');
+    function renderMarkdownText(text) {
+      if (!text) return '';
+      ensureMarkedConfigured();
+      if (typeof marked === 'undefined' || !marked || typeof marked.use !== 'function' || typeof marked.parse !== 'function') return null;
+      try {
+        return sanitizeMdUrls(marked.parse(text)).replace(/<p><\\/p>/g, '');
+      } catch (err) {
+        return null;
+      }
+    }
+
+    /** 围栏代码块：语言标签 + 复制按钮 + Prism 语言类 */
+    function renderCodeSegment(raw) {
+      let code = raw;
+      let lang = '';
+      const newlineIdx = code.indexOf('\\n');
+      if (newlineIdx === 0) {
+        const nextNewline = code.indexOf('\\n', 1);
+        const firstLine = nextNewline > 0 ? code.substring(1, nextNewline).trim() : code.substring(1).trim();
+        if (firstLine && /^[a-zA-Z0-9\\-+_]+$/.test(firstLine) && firstLine.length <= 20) {
+          lang = firstLine.toLowerCase();
+          code = nextNewline > 0 ? code.substring(nextNewline + 1) : '';
+        }
+      } else if (newlineIdx > 0) {
+        const firstLine = code.substring(0, newlineIdx).trim();
+        if (firstLine && /^[a-zA-Z0-9\\-+_]+$/.test(firstLine) && firstLine.length <= 20) {
+          lang = firstLine.toLowerCase();
+          code = code.substring(newlineIdx + 1);
         }
       }
 
-      return processedParts.join('');
+      const langMap = {
+        'js': 'javascript', 'jsx': 'javascript',
+        'ts': 'typescript', 'tsx': 'typescript',
+        'sh': 'bash', 'shell': 'bash', 'zsh': 'bash',
+        'py': 'python', 'python3': 'python',
+        'yml': 'yaml',
+        'md': 'markdown',
+        'jsonc': 'json',
+      };
+      const prismLang = langMap[lang] || lang;
+      const langClass = prismLang ? 'language-' + prismLang : '';
+      const langLabel = lang || 'text';
+
+      const escapedCode = escapeHtml(code);
+      const escapedLangLabel = escapeHtml(langLabel);
+      const escapedLangClass = escapeHtml(langClass);
+      const copyId = 'copy-' + Math.random().toString(36).substr(2, 9);
+      const headerHtml = '<div class="code-block-header"><span class="code-block-lang">' + escapedLangLabel + '</span><button class="code-block-copy" data-copy-id="' + copyId + '" onclick="copyCodeBlock(this)">复制</button></div>';
+      return '<pre>' + headerHtml + '<code' + (escapedLangClass ? ' class="' + escapedLangClass + '"' : '') + ' id="' + copyId + '" data-raw-code="' + encodeURIComponent(code) + '"' + '>' + escapedCode + '</code></pre>';
+    }
+
+    /** 文本段（Markdown）与围栏代码块交替渲染 */
+    function renderInlineSegments(content) {
+      const parts = String(content).split(MD_FENCE);
+      const out = [];
+      for (let i = 0; i < parts.length; i++) {
+        if (i % 2 === 0) {
+          const rendered = renderMarkdownText(parts[i]);
+          out.push(rendered === null ? formatPlainText(parts[i], MD_BACKTICK) : rendered);
+        } else {
+          out.push(renderCodeSegment(parts[i]));
+        }
+      }
+      return out.join('');
+    }
+
+    /** 摘出围栏代码块之外的 <details> 折叠块；必须是 <details><br>*<summary>…</summary>…</details> 结构（嵌套 details 保留在正文里） */
+    function extractDetailsBlocks(content) {
+      const source = String(content);
+      const fenceRe = new RegExp(MD_FENCE, 'g');
+      const fences = [];
+      let fm;
+      while ((fm = fenceRe.exec(source)) !== null) fences.push(fm.index);
+      const insideFence = function (idx) {
+        for (let i = 0; i + 1 < fences.length; i += 2) {
+          if (idx > fences[i] && idx < fences[i + 1]) return true;
+        }
+        return false;
+      };
+      const OPEN = '<details>';
+      const CLOSE = '</details>';
+      const blocks = [];
+      let out = '';
+      let cursor = 0;
+      while (cursor < source.length) {
+        const start = source.indexOf(OPEN, cursor);
+        if (start < 0) break;
+        // 深度配对，找到与外层 <details> 匹配的 </details>
+        let depth = 0;
+        let scan = start;
+        let end = -1;
+        while (true) {
+          const nextOpen = source.indexOf(OPEN, scan + 1);
+          const nextClose = source.indexOf(CLOSE, scan + 1);
+          if (nextClose < 0) break;
+          if (nextOpen >= 0 && nextOpen < nextClose) { depth += 1; scan = nextOpen; }
+          else if (depth > 0) { depth -= 1; scan = nextClose; }
+          else { end = nextClose; break; }
+        }
+        if (end < 0) {
+          // 嵌套/散落标签导致深度配对失败时，回退到最近的一个 </details>；仍找不到才当普通文本
+          const fallback = source.indexOf(CLOSE, start + OPEN.length);
+          end = fallback;
+        }
+        if (end < 0) {
+          // 没有可配对的 </details>（内容被截断）：当作普通文本，继续往后扫描
+          out += source.slice(cursor, start + OPEN.length);
+          cursor = start + OPEN.length;
+          continue;
+        }
+        const inner = source.slice(start + OPEN.length, end);
+        const summaryMatch = inner.match(/^(?:<br\\s*\\/?>)*\\s*<summary>([\\s\\S]*?)<\\/summary>(?:<br\\s*\\/?>)*([\\s\\S]*)$/i);
+        // 围栏内或不是标准折叠块结构（散落的字面标签）→ 原样交回 Markdown 转义
+        if (insideFence(start) || !summaryMatch) {
+          out += source.slice(cursor, end + CLOSE.length);
+          cursor = end + CLOSE.length;
+          continue;
+        }
+        blocks.push({ summary: summaryMatch[1], body: summaryMatch[2] });
+        out += source.slice(cursor, start) + '\\n\\n' + MD_DETAILS_PREFIX + (blocks.length - 1) + '_\\n\\n';
+        cursor = end + CLOSE.length;
+      }
+      out += source.slice(cursor);
+      // 未被识别为标准折叠块的散落 details/summary 标签转义为文本（否则会被 marked 当作 HTML 块，块内 Markdown 不再解析）
+      const cleaned = out.split(MD_FENCE).map(function (part, i) {
+        return i % 2 === 0
+          ? part.replace(/<\\/?(?:details|summary)\\b[^>]*>/gi, function (tag) { return escapeHtml(tag); })
+          : part;
+      }).join(MD_FENCE);
+      return { stripped: cleaned, blocks: blocks };
+    }
+
+    /** 折叠块：<details><summary>标题</summary>正文</details>，正文按 Markdown 渲染（<br> 视作换行） */
+    function renderDetailsBlock(summary, body) {
+      const bodyMd = String(body || '').replace(/<br\\s*\\/?>/gi, '\\n');
+      const title = String(summary || '详情').trim() || '详情';
+      return '<details><summary>' + escapeHtml(title) + '</summary>' + renderInlineSegments(bodyMd) + '</details>';
+    }
+
+    /** TOC/摘要标签：剥离 Markdown 结构标记，只保留可读文本 */
+    function plainLabel(text) {
+      return String(text)
+        .replace(/^#{1,6}\\s+/, '')
+        .replace(/^>\\s?/, '')
+        .replace(/^(?:[-*+]|\\d+[.)])\\s+/, '')
+        .replace(/!?\\[([^\\]]*)\\]\\([^)]*\\)/g, '$1')
+        .split(String.fromCharCode(96)).join('')
+        .replace(/[*_~]{1,3}/g, '')
+        .trim();
+    }
+
+    /** 降级渲染（marked 不可用）：转义 + 放行 details/summary/br + 行内代码 + 换行 */
+    function formatPlainText(content, backtick) {
+      let text = content
+        .replace(/<details>/g, '\\u0001')
+        .replace(/<\\/details>/g, '\\u0002')
+        .replace(/<summary>/g, '\\u0003')
+        .replace(/<\\/summary>/g, '\\u0004')
+        .replace(/<br>/gi, '\\u0005');
+      text = escapeHtml(text);
+      const inlineParts = text.split(backtick);
+      for (let j = 1; j < inlineParts.length - 1; j += 2) {
+        if (j + 1 < inlineParts.length) {
+          inlineParts[j] = '<code>' + inlineParts[j] + '</code>';
+        }
+      }
+      text = inlineParts.join('');
+      text = text.split('\\n').join('<br>');
+      return text
+        .split('\\u0001').join('<details>')
+        .split('\\u0002').join('</details>')
+        .split('\\u0003').join('<summary>')
+        .split('\\u0004').join('</summary>')
+        .split('\\u0005').join('<br>');
+    }
+
+    function formatConversationContent(content) {
+      if (!content) return '';
+      const detail = extractDetailsBlocks(content);
+      let html = renderInlineSegments(detail.stripped);
+      if (detail.blocks.length) {
+        html = html.replace(new RegExp(MD_DETAILS_PREFIX + '(\\\\d+)_', 'g'), function (_m, n) {
+          const blk = detail.blocks[Number(n)];
+          return blk === undefined ? '' : renderDetailsBlock(blk.summary, blk.body);
+        });
+        // 占位符独占一段时会被 <p> 包裹，details 是块级元素，去掉外层段落避免浏览器补出空段落
+        html = html.replace(/<p>\\s*(<details>[\\s\\S]*?<\\/details>)\\s*<\\/p>/g, '$1');
+      }
+      return html.replace(/<p>\\s*<\\/p>/g, '');
     }
 
     function formatToolContent(content) {
@@ -2773,7 +2956,7 @@ async function ensureProjectDetail(
  * 两列目录树/subagent 子会话恢复、含结论的步骤组按 kind 切分出独立回复卡）时 +1，
  * regenerateViews 检测到不一致会强制重建全部项目页（存量页面刷新）。
  */
-const VIEW_VERSION = 10;
+const VIEW_VERSION = 16;
 
 /**
  * 再生成全部 HTML 视图。
